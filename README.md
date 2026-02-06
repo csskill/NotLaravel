@@ -1,5 +1,7 @@
 # FRAMEWORK README
 
+NOTE: This readme is currently not up-to-date and will be rewritten in the near future
+
 Full detailed overview and explanation of the framework.
 It is custom built with heavy inspiration from the Laravel framework and follow a lot of the same conventions as Laravel.
 
