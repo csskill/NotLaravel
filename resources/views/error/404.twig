@@ -1,0 +1,88 @@
+{% extends "base.html.twig" %}
+
+{% block page_title %}
+    Page not found
+{% endblock %}
+
+{% block content %}
+
+<div class="container py-5">
+
+    <div class="row justify-content-center mb-4">
+        <div class="col-lg-8 text-center">
+
+            <!-- Big 404 -->
+            <h1 class="display-1 fw-bold text-primary mb-3">
+                404
+            </h1>
+
+            <h2 class="mb-3">
+                That page doesn’t exist
+            </h2>
+
+            <p class="lead text-muted mb-4">
+                Looks like this page was deleted, moved,
+                or never existed in the first place.
+            </p>
+
+            <!-- Actions -->
+            <div class="d-flex justify-content-center gap-3 flex-wrap mb-5">
+                <a href="/" class="btn btn-primary btn-lg">
+                    Go home
+                </a>
+                <a href="/blog" class="btn btn-outline-secondary btn-lg">
+                    Read the blog
+                </a>
+            </div>
+
+        </div>
+    </div>
+
+    <!-- Optional: helpful links -->
+    <div class="row justify-content-center">
+        <div class="col-lg-10 col-xl-8">
+
+            <div class="card border-0 shadow-sm">
+                <div class="card-body p-4 p-md-5">
+
+                    <h3 class="h5 mb-4 text-center">
+                        You might be looking for
+                    </h3>
+
+                    <div class="row g-4 text-center">
+
+                        <div class="col-md-4">
+                            <i class="bi bi-graph-up fs-2 text-primary mb-2"></i>
+                            <h4 class="h6">Some other page</h4>
+                            <p class="text-muted small">
+                                With other information
+                            </p>
+                        </div>
+
+                        <div class="col-md-4">
+                            <i class="bi bi-journal-text fs-2 text-primary mb-2"></i>
+                            <h4 class="h6">Blog articles</h4>
+                            <p class="text-muted small">
+                                Read the latest news
+                            </p>
+                        </div>
+
+                        <div class="col-md-4">
+                            <i class="bi bi-person-plus fs-2 text-primary mb-2"></i>
+                            <h4 class="h6">Join our community</h4>
+                            <p class="text-muted small">
+                                Link to a community
+                            </p>
+                        </div>
+
+                    </div>
+
+                </div>
+            </div>
+
+        </div>
+    </div>
+
+</div>
+
+{% endblock %}

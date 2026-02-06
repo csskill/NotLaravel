@@ -1,0 +1,38 @@
+#!/usr/bin/env php
+<?php
+ini_set('display_errors', 1);
+ini_set('display_startup_errors', 1);
+error_reporting(E_ALL);
+
+/*
+ * This file is part of the notlaravel project.
+ *
+ * (c) Ole Haugset
+ *  
+ * Used as a terminal layer for shortcut commands to create new Controller and Model classes
+ */
+
+$_SERVER['REQUEST_URI'] =  '/cli';
+$_SERVER['REQUEST_METHOD'] = 'GET';
+$_SERVER['HTTP_HOST'] = 'localhost';
+
+require __DIR__ . '/vendor/autoload.php';
+
+// Load global helper functions
+require_once __DIR__ . '/app/Helpers/helpers.php';
+
+$app = new Symfony\Component\Console\Application('NRAA Console worker', '1.0.0 ');
+$app->add(new \Nraa\Pillars\Console\JobRunnerCommand());
+$app->add(new \Nraa\Pillars\Console\JobWorkerCommand());
+$app->add(new \Nraa\Pillars\Console\UpdateIndexesCommand());
+$nraaApp = require_once __DIR__ . '/app/app.php';
+
+// Register recurring jobs
+if (file_exists(__DIR__ . '/app/jobs.php')) {
+    require_once __DIR__ . '/app/jobs.php';
+}
+
+$nraaApp->addConfiguration(function ($app) {})
+    ->handleRequest(new \Nraa\Http\HttpRequest());
+
+$app->run();

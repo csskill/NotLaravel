@@ -1,0 +1,49 @@
+{
+    "require": {
+        "monolog/monolog": "3.0.*",
+        "mongodb/mongodb": "^2.1",
+        "twig/twig": "^3.0",
+        "symfony/http-foundation": "^7.3",
+        "psr/container": "^2.0",
+        "symfony/http-kernel": "^7.3",
+        "symfony/dotenv": "^7.3",
+        "symfony/event-dispatcher": "^7.3",
+        "symfony/http-client": "^7.3",
+        "nyholm/psr7": "^1.8",
+        "guzzlehttp/guzzle": "^7.10",
+        "guzzlehttp/psr7": "^2.8",
+        "http-interop/http-factory-guzzle": "^1.2",
+        "illuminate/console": "^11.46",
+        "react/event-loop": "^1.5",
+        "react/promise": "^3.3",
+        "dragonmantank/cron-expression": "^3.4",
+        "react/promise-timer": "^1.11",
+        "symfony/process": "^7.3",
+        "doctrine/collections": "^2.3",
+        "doctrine/mongodb-odm": "^2.12",
+        "opis/closure": "^4.3",
+        "react/child-process": "^0.6.5",
+        "react/async": "^4.3",
+        "react/http": "^1.10",
+        "phpoption/phpoption": "^1.9",
+        "league/flysystem": "^3.0",
+        "league/flysystem-aws-s3-v3": "^3.0",
+        "vlucas/phpdotenv": "^5.0",
+        "league/flysystem-ftp": "^3.0",
+        "league/flysystem-sftp-v3": "^3.0",
+        "league/flysystem-google-cloud-storage": "^3.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "Nraa\\": [
+                "bootstrap/",
+                "app/"
+            ]
+        }
+    },
+    "config": {
+        "allow-plugins": {
+            "php-http/discovery": true
+        }
+    }
+}

@@ -1,0 +1,5 @@
+# CSSkill.com Robots.txt
+# https://CSSkill.com
+
+User-agent: *
+Allow: /

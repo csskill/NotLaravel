@@ -1,0 +1,54 @@
+{# views/base.html.twig #}
+<!doctype html>
+<html lang="en">
+	<head>
+
+		<meta charset="utf-8">
+		<meta name="viewport" content="width=device-width, initial-scale=1.0">
+		
+		{# SEO: Page Title #}
+		<title>{% block page_title %}Your page{% endblock %}</title>
+		
+		{# SEO: Meta Description - Override in child templates #}
+		{% block meta_description %}
+		<meta name="description" content="Description">
+		{% endblock %}
+		
+		{# SEO: Meta Keywords - Override in child templates #}
+		{% block meta_keywords %}
+		<meta name="keywords" content="Keywords">
+		{% endblock %}
+		
+		{# SEO: Canonical URL - Override in child templates #}
+		{% block canonical_url %}{% endblock %}
+		
+		{# SEO: Robots - Override in child templates if needed #}
+		{% block meta_robots %}
+		<meta name="robots" content="index, follow">
+		{% endblock %}
+		
+		{# SEO: Author #}
+		{% block meta_author %}
+		<meta name="author" content="">
+		{% endblock %}
+		
+		<link rel="preconnect" href="https://fonts.googleapis.com">
+
+		{% block prepend_js %}{% endblock %}
+
+		<script src="https://ajax.googleapis.com/ajax/libs/jquery/3.7.1/jquery.min.js"></script>
+		<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/css/bootstrap.min.css" rel="stylesheet" integrity="sha384-sRIl4kxILFvY47J16cr9ZwB07vP4J8+LH7qKQnuqkuIAvNWLzeN8tE5YBujZqJLB" crossorigin="anonymous">
+
+		<link rel="stylesheet" href="/css/styles.css">
+
+		{% block append_head %}{% endblock %}
+
+	</head>
+
+	<body data-bs-theme="dark" id="{% block body_id %}{% endblock %}">
+		{% block content %}{% endblock %}
+		{% block append_footer %}{% endblock %}
+		{% block append_js %}{% endblock %}
+	</body>
+
+</html>

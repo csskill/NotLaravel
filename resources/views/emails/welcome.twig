@@ -1,0 +1,13 @@
+{% extends "emails/base.twig" %}
+
+{% block subject %}Welcome to website!{% endblock %}
+
+{% block content %}
+<h2>Welcome to website, {{ user.username|default(user.email) }}!</h2>
+
+<p>Thank you for joining website! We're excited to have you on board.</p>
+
+<p>If you have any questions or need help getting started, don't hesitate to reach out.</p>
+
+<p>Best regards,<br>The website Team</p>
+{% endblock %}

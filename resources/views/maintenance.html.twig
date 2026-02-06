@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en" data-bs-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Maintenance</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body {
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+        }
+
+        .maintenance-container {
+            text-align: center;
+            padding: 3rem 2rem;
+            max-width: 600px;
+        }
+
+        .maintenance-icon {
+            font-size: 6rem;
+            margin-bottom: 2rem;
+            animation: pulse 2s ease-in-out infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% {
+                opacity: 1;
+                transform: scale(1);
+            }
+            50% {
+                opacity: 0.7;
+                transform: scale(1.05);
+            }
+        }
+
+        .maintenance-title {
+            font-size: 2.5rem;
+            font-weight: 700;
+            color: #fff;
+            margin-bottom: 1rem;
+        }
+
+        .maintenance-message {
+            font-size: 1.2rem;
+            color: rgba(255, 255, 255, 0.7);
+            margin-bottom: 2rem;
+            line-height: 1.6;
+        }
+
+        .maintenance-details {
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 12px;
+            padding: 1.5rem;
+            margin-top: 2rem;
+        }
+
+        .maintenance-details p {
+            margin: 0;
+            color: rgba(255, 255, 255, 0.6);
+            font-size: 0.9rem;
+        }
+
+        .spinner {
+            display: inline-block;
+            width: 50px;
+            height: 50px;
+            border: 3px solid rgba(255, 255, 255, 0.1);
+            border-top-color: #0d6efd;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-top: 2rem;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .logo {
+            font-size: 2rem;
+            font-weight: bold;
+            color: #0d6efd;
+            margin-bottom: 3rem;
+        }
+    </style>
+</head>
+<body>
+    <div class="maintenance-container">
+        <div class="logo">LOGO</div>
+        
+        <div class="maintenance-icon">🔧</div>
+        
+        <h1 class="maintenance-title">Under Maintenance</h1>
+        
+        <p class="maintenance-message">
+            We're currently performing scheduled maintenance to improve your experience.
+            We'll be back online shortly.
+        </p>
+
+        <div class="spinner"></div>
+
+        <div class="maintenance-details">
+            <p>Thank you for your patience. Please check back soon.</p>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>
