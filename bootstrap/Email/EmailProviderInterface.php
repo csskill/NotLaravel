@@ -24,6 +24,7 @@ interface EmailProviderInterface
         string $htmlBody,
         ?string $textBody = null,
         ?string $fromEmail = null,
-        ?string $fromName = null
+        ?string $fromName = null,
+        array $options = []
     ): bool;
 }

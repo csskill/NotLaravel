@@ -24,22 +24,28 @@ class JobHeartbeat
     public static function update(string $jobId): bool
     {
         try {
-            $job = JobDocument::findOne(['_id' => new \MongoDB\BSON\ObjectId($jobId)]);
-            
-            if (!$job) {
-                return false;
+            $instance = new JobDocument();
+            $now = new \MongoDB\BSON\UTCDateTime(new \DateTimeImmutable());
+
+            $result = $instance->getCollection()->updateOne(
+                [
+                    '_id' => new \MongoDB\BSON\ObjectId($jobId),
+                    'status' => 'in_progress',
+                ],
+                [
+                    '$set' => [
+                        'lastHeartbeat' => $now,
+                        'updatedAt' => $now,
+                    ],
+                ]
+            );
+
+            $updated = $result->getMatchedCount() > 0;
+            if ($updated) {
+                JobRealtimeStateService::getInstance()->recordHeartbeat($jobId);
             }
 
-            // Only update heartbeat for in-progress jobs
-            if ($job->status !== 'in_progress') {
-                return false;
-            }
-
-            // Update heartbeat timestamp
-            $job->lastHeartbeat = new \MongoDB\BSON\UTCDateTime(new \DateTimeImmutable());
-            $job->save();
-
-            return true;
+            return $updated;
         } catch (\Throwable $e) {
             // Don't let heartbeat failures break job execution
             error_log("Failed to update heartbeat for job {$jobId}: " . $e->getMessage());

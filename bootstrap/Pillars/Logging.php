@@ -5,6 +5,7 @@ namespace Nraa\Pillars;
 use Exception;
 use Nraa\Database\Log\MongoDbLogProvider;
 use Nraa\Filesystem\FileLogProvider;
+use Nraa\Filesystem\StreamLogProvider;
 
 class Logging
 {
@@ -36,9 +37,24 @@ class Logging
     public static function getInstance(): Logging
     {
         if (static::$instance === null) {
+            if (self::shouldUseMutedTestLogger()) {
+                static::$instance = new self('', []);
+                return static::$instance;
+            }
             throw new Exception("Logging needs to be instantiated with a configuration before it can be used.");
         }
         return static::$instance;
+    }
+
+    private static function shouldUseMutedTestLogger(): bool
+    {
+        $flag = $_ENV['APP_RUNNING_TESTS'] ?? getenv('APP_RUNNING_TESTS') ?: null;
+        if (filter_var($flag, FILTER_VALIDATE_BOOLEAN) === true) {
+            return true;
+        }
+
+        $appEnv = strtolower(trim((string)($_ENV['APP_ENV'] ?? getenv('APP_ENV') ?: '')));
+        return in_array($appEnv, ['test', 'testing'], true);
     }
 
     /**
@@ -87,6 +103,10 @@ class Logging
             $this->channels[$channel] = $this->ensureChannelHasSetorDefaultValues($channelConfig);
             if ($channelConfig['driver'] == 'file') {
                 $this->logProviderInstances[$channel] = new FileLogProvider($channelConfig['driver'], $basePath . $channelConfig['path'], $channel);
+            }
+            if ($channelConfig['driver'] == 'stdout') {
+                $stream = (string)($channelConfig['stream'] ?? 'auto');
+                $this->logProviderInstances[$channel] = new StreamLogProvider($channelConfig['driver'], $stream, $channel);
             }
             if ($channelConfig['driver'] == 'mongodb') {
                 $this->logProviderInstances[$channel] = new MongoDbLogProvider($channelConfig['driver'], $channelConfig['table']);
@@ -198,6 +218,17 @@ class Logging
     public function writeLogForSpecificChannel($channel, $message, $logLevel)
     {
         $instance = $this->logProviderInstances[$channel];
-        $instance->writeLog($message, $logLevel);
+        $channelConfig = $this->channels[$channel] ?? [];
+        if (($channelConfig['backtrace'] ?? true) === true) {
+            $trace = debug_backtrace(DEBUG_BACKTRACE_IGNORE_ARGS, $channelConfig['backtraceLevels'] ?? 2);
+            $logMessage = new \stdClass();
+            $logMessage->message = $message;
+            $logMessage->trace = $trace;
+            $jsonMessage = json_encode($logMessage);
+            $instance->writeLog($jsonMessage, $logLevel, $message);
+            return;
+        }
+
+        $instance->writeLog('', $logLevel, $message);
     }
 }

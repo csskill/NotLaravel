@@ -2,9 +2,10 @@
 
 namespace Nraa\Workers;
 
-use React\EventLoop\Loop;
-use Nraa\Workers\Documents\JobDocument;
+use MongoDB\BSON\ObjectId;
 use Nraa\Workers\Documents\JobExecutionDocument;
+use Nraa\Workers\Documents\JobDocument;
+use Nraa\Workers\Exceptions\AutoResolveException;
 use Nraa\Workers\JobRetryStrategy;
 use \React\Promise\Deferred;
 use function Opis\Closure\{serialize, unserialize};
@@ -14,6 +15,7 @@ class JobExecution
     protected Worker $worker;
     protected $job;
     protected \DateTimeImmutable $startedAt;
+    protected JobQueue $queue;
 
     /**
      * Constructs a new JobExecution instance.
@@ -26,6 +28,7 @@ class JobExecution
         $this->worker = $worker;
         $this->job = $job;
         $this->startedAt = new \DateTimeImmutable();
+        $this->queue = new JobQueue();
     }
 
     /**
@@ -77,7 +80,7 @@ class JobExecution
      *
      * @param Deferred $deferred The deferred promise to resolve or reject when the job execution process is complete.
      * @param int|null $maxAttempts The maximum number of attempts (defaults to job's maxAttempts or 3).
-     * @param int $attempt The current attempt number (1-based).
+     * @param int $attempt The current attempt number (kept for compatibility, unused for retry accounting).
      */
     public function executeAsync(Deferred $deferred, ?int $maxAttempts = null, int $attempt = 1): void
     {
@@ -86,6 +89,9 @@ class JobExecution
 
         // Job is already marked as 'in_progress' by getNextJob() atomic operation
         // No need to update status again - this caused race conditions!
+        if ($this->disableJobIfSuppressed('before execution', $deferred)) {
+            return;
+        }
 
         try {
             $task = $this->job->task ?? [];
@@ -170,16 +176,7 @@ class JobExecution
             
             // Try to mark job as completed, but don't let failure block promise resolution
             // The job executed successfully - even if we can't update the status, we should resolve the promise
-            $markCompletedSuccess = false;
-            try {
-            $this->job->markCompleted();
-                $markCompletedSuccess = true;
-            } catch (\Throwable $markError) {
-                echo "❌ [" . date('H:i:s') . "] Failed to mark job {$this->job->id} as completed: {$markError->getMessage()}\n";
-                echo "{$markError->getTraceAsString()}\n";
-                // Don't re-throw - we'll still resolve the promise so the worker doesn't block
-                // The job executed successfully, even if we couldn't update the status in the database
-            }
+            $markCompletedSuccess = $this->finalizeSuccessfulJob();
             
             // Resolve the deferred promise - this MUST happen or the worker will block
             // The promise MUST be resolved/rejected even if markCompleted failed
@@ -218,16 +215,31 @@ class JobExecution
                 }
             }
         } catch (\Nraa\Workers\Exceptions\RequeueException $e) {
-            // Special handling for RequeueException - return job to queue without counting as failure
-
-            // Increment attempts counter and calculate exponential backoff
-            $currentAttempts = $this->job->attempts ?? 0;
+            // Special handling for RequeueException with capped attempts.
+            // RequeueException represents transient conditions (rate limits, login throttles, etc.),
+            // but we still enforce maxAttempts to avoid infinite retry loops.
+            $currentAttempts = (int)($this->job->attempts ?? 0);
             $newAttempts = $currentAttempts + 1;
-            $maxAttempts = $this->job->maxAttempts ?? 10; // Default to 10 if not specified
+            $cappedAttempts = min($newAttempts, $maxAttempts);
+            if ($this->disableJobIfSuppressed('after failure', $deferred, $e->getMessage(), $cappedAttempts)) {
+                return;
+            }
 
-            // Check if we've exceeded max attempts
             if ($newAttempts >= $maxAttempts) {
+                $finalMessage = $this->buildMaxAttemptsMessage($maxAttempts, $e->getMessage());
+
                 echo "❌ [" . date('H:i:s') . "] Job {$this->job->id} exceeded max attempts ({$maxAttempts}): {$e->getMessage()}\n";
+
+                $this->job->status = 'failed';
+                $this->job->attempts = $cappedAttempts;
+                $this->job->error = $finalMessage;
+                $this->job->failedAt = new \MongoDB\BSON\UTCDateTime(new \DateTimeImmutable());
+                $this->job->assignee = null;
+                $this->job->assignedAt = null;
+                $this->job->startedAt = null;
+                $this->job->lastHeartbeat = null;
+                $this->job->nextRunAt = null;
+                $this->job->save();
 
                 JobExecutionDocument::log([
                     'jobId'      => (string)$this->job->id,
@@ -237,12 +249,12 @@ class JobExecution
                     'finishedAt' => new \MongoDB\BSON\UTCDateTime(new \DateTimeImmutable()),
                     'execution_time' => $this->startedAt->diff(new \DateTimeImmutable())->format('%H:%I:%S.%f'),
                     'status'     => 'failed',
-                    'error'      => "Max attempts exceeded ({$maxAttempts}): " . $e->getMessage(),
-                    'attempts'   => $newAttempts,
+                    'error'      => $finalMessage,
+                    'attempts'   => $cappedAttempts,
                 ]);
+                $this->queue->handleJobTerminal($this->job, $this->worker->getId(), 'failed', $finalMessage);
 
-                $this->job->markFailed("Max attempts exceeded ({$maxAttempts}): " . $e->getMessage());
-                $deferred->reject(new \Exception("Max attempts exceeded: " . $e->getMessage()));
+                $deferred->reject(new \RuntimeException($finalMessage, 0, $e));
                 return;
             }
 
@@ -253,13 +265,21 @@ class JobExecution
             echo "↩️  [" . date('H:i:s') . "] Job {$this->job->id} returned to queue (attempt {$newAttempts}/{$maxAttempts}): {$e->getMessage()}\n";
             echo "   Next retry in " . gmdate('i:s', $delaySeconds) . "\n";
 
+            if ($this->disableJobIfSuppressed('before retry', $deferred, $e->getMessage(), $cappedAttempts)) {
+                return;
+            }
+
             // Mark job as pending again with exponential backoff
             $this->job->status = 'pending';
-            $this->job->attempts = $newAttempts;
+            $this->job->attempts = $cappedAttempts;
             $this->job->nextRunAt = new \MongoDB\BSON\UTCDateTime((new \DateTimeImmutable())->modify("+{$delaySeconds} seconds"));
             $this->job->assignee = null;
+            $this->job->assignedAt = null;
             $this->job->startedAt = null;
+            $this->job->lastHeartbeat = null;
+            $this->job->error = $e->getMessage();
             $this->job->save();
+            $this->queue->handleJobRequeued($this->job, $this->worker->getId(), $delaySeconds, $e->getMessage());
 
             // Log the requeue (not a failure)
             JobExecutionDocument::log([
@@ -271,28 +291,91 @@ class JobExecution
                 'execution_time' => $this->startedAt->diff(new \DateTimeImmutable())->format('%H:%I:%S.%f'),
                 'status'     => 'requeued',
                 'error'      => $e->getMessage(),
-                'attempts'   => $newAttempts,
+                'attempts'   => $cappedAttempts,
                 'nextRetryDelay' => $delaySeconds,
             ]);
 
-            $deferred->resolve(['status' => 'requeued', 'message' => $e->getMessage(), 'attempts' => $newAttempts]);
+            $deferred->resolve(['status' => 'requeued', 'message' => $e->getMessage(), 'attempts' => $cappedAttempts]);
+        } catch (AutoResolveException $e) {
+            $currentAttempts = (int)($this->job->attempts ?? 0);
+            $newAttempts = $currentAttempts + 1;
+            $cappedAttempts = min($newAttempts, $maxAttempts);
+
+            echo "ℹ️ [" . date('H:i:s') . "] Job {$this->job->id} auto-resolved: {$e->getMessage()}\n";
+
+            JobExecutionDocument::log([
+                'jobId'      => (string)$this->job->id,
+                'workerId'   => $this->worker->getId(),
+                'employer'   => $this->job->employer ?? 'unknown',
+                'startedAt'  => new \MongoDB\BSON\UTCDateTime($this->startedAt),
+                'finishedAt' => new \MongoDB\BSON\UTCDateTime(new \DateTimeImmutable()),
+                'execution_time' => $this->startedAt->diff(new \DateTimeImmutable())->format('%H:%I:%S.%f'),
+                'status'     => 'auto_resolved',
+                'error'      => $e->getMessage(),
+                'attempts'   => $cappedAttempts,
+            ]);
+
+            $this->job->attempts = $cappedAttempts;
+            $this->job->markAutoResolved($e->getMessage());
+            $this->queue->handleJobTerminal($this->job, $this->worker->getId(), 'auto_resolved', $e->getMessage());
+
+            $deferred->resolve([
+                'status' => 'auto_resolved',
+                'message' => $e->getMessage(),
+                'attempts' => $cappedAttempts,
+            ]);
+            return;
         } catch (\Throwable $e) {
-            if (JobRetryStrategy::shouldRetry($attempt, $maxAttempts)) {
-                $delay = JobRetryStrategy::getDelay($attempt);
-                
-                // Increment attempts counter
-                $this->job->attempts = ($this->job->attempts ?? 0) + 1;
+            $currentAttempts = (int)($this->job->attempts ?? 0);
+            $newAttempts = $currentAttempts + 1;
+            $cappedAttempts = min($newAttempts, $maxAttempts);
+            if ($this->disableJobIfSuppressed('after failure', $deferred, $e->getMessage(), $cappedAttempts)) {
+                return;
+            }
+
+            if (JobRetryStrategy::shouldRetry($newAttempts, $maxAttempts)) {
+                $delay = JobRetryStrategy::getDelay($cappedAttempts);
+
+                if ($this->disableJobIfSuppressed('before retry', $deferred, $e->getMessage(), $cappedAttempts)) {
+                    return;
+                }
+
+                // Queue-based retry: move job back to pending with delay.
+                $this->job->status = 'pending';
+                $this->job->attempts = $cappedAttempts;
+                $this->job->nextRunAt = new \MongoDB\BSON\UTCDateTime((new \DateTimeImmutable())->modify("+{$delay} seconds"));
                 $this->job->assignee = null;
+                $this->job->assignedAt = null;
                 $this->job->startedAt = null;
+                $this->job->lastHeartbeat = null;
+                $this->job->error = $e->getMessage();
                 $this->job->save();
-                
-                echo "⚠️ [" . date('H:i:s') . "] Job {$this->job->id} failed (attempt {$attempt}/{$maxAttempts}). Retrying in {$delay}s...\n";
+                $this->queue->handleJobRequeued($this->job, $this->worker->getId(), $delay, $e->getMessage());
+
+                echo "⚠️ [" . date('H:i:s') . "] Job {$this->job->id} failed (attempt {$cappedAttempts}/{$maxAttempts}). Requeued in {$delay}s...\n";
                 echo "Error: {$e->getMessage()}\n";
                 echo "{$e->getTraceAsString()}\n";
-                Loop::addTimer($delay, function () use ($deferred, $maxAttempts, $attempt) {
-                    $this->executeAsync($deferred, $maxAttempts, $attempt + 1);
-                });
-                return; // Important: exit early, don't mark as failed yet
+
+                JobExecutionDocument::log([
+                    'jobId'      => (string)$this->job->id,
+                    'workerId'   => $this->worker->getId(),
+                    'employer'   => $this->job->employer ?? 'unknown',
+                    'startedAt'  => new \MongoDB\BSON\UTCDateTime($this->startedAt),
+                    'finishedAt' => new \MongoDB\BSON\UTCDateTime(new \DateTimeImmutable()),
+                    'execution_time' => $this->startedAt->diff(new \DateTimeImmutable())->format('%H:%I:%S.%f'),
+                    'status'     => 'requeued',
+                    'error'      => $e->getMessage(),
+                    'attempts'   => $cappedAttempts,
+                    'nextRetryDelay' => $delay,
+                ]);
+
+                $deferred->resolve([
+                    'status' => 'requeued',
+                    'message' => $e->getMessage(),
+                    'attempts' => $cappedAttempts,
+                    'nextRetryDelay' => $delay,
+                ]);
+                return;
             }
 
             // Final failure after all retries exhausted
@@ -305,12 +388,101 @@ class JobExecution
                 'execution_time' => $this->startedAt->diff(new \DateTimeImmutable())->format('%H:%I:%S.%f'),
                 'status'     => 'failed',
                 'error'      => $e->getMessage(),
-                'attempts'   => $attempt,
+                'attempts'   => $cappedAttempts,
             ]);
 
+            // Count the terminal failed run as an attempt.
+            $this->job->attempts = $cappedAttempts;
             $this->job->markFailed($e->getMessage());
+            $this->queue->handleJobTerminal($this->job, $this->worker->getId(), 'failed', $e->getMessage());
 
             $deferred->reject($e);
         }
+    }
+
+    private function finalizeSuccessfulJob(): bool
+    {
+        $jobId = trim((string)($this->job->id ?? ''));
+        if ($jobId === '') {
+            return false;
+        }
+
+        $workerId = $this->worker->getId();
+        $lastError = null;
+
+        for ($attempt = 1; $attempt <= 3; $attempt++) {
+            try {
+                $job = $attempt === 1
+                    ? $this->job
+                    : JobDocument::findOne(['_id' => new ObjectId($jobId)]);
+
+                if (!$job instanceof JobDocument) {
+                    throw new \RuntimeException('Job document missing during successful finalization');
+                }
+
+                $job->markCompleted();
+                $this->queue->handleJobCompleted($job, $workerId);
+                $this->job = $job;
+
+                return true;
+            } catch (\Throwable $markError) {
+                $lastError = $markError;
+                echo "❌ [" . date('H:i:s') . "] Failed to finalize completed job {$jobId} (attempt {$attempt}/3): {$markError->getMessage()}\n";
+                if ($attempt < 3) {
+                    usleep($attempt * 200000);
+                }
+            }
+        }
+
+        if ($lastError instanceof \Throwable) {
+            echo "❌ [" . date('H:i:s') . "] CRITICAL: Job {$jobId} executed successfully but could not be finalized after retries: {$lastError->getMessage()}\n";
+        }
+
+        return false;
+    }
+
+    private function buildMaxAttemptsMessage(int $maxAttempts, string $reason): string
+    {
+        $cleanedReason = trim(preg_replace('/\s+Job will be retried\.?$/i', '', $reason) ?? $reason);
+        return "Max attempts exceeded ({$maxAttempts}): {$cleanedReason}. No more retries.";
+    }
+
+    private function disableJobIfSuppressed(
+        string $context,
+        Deferred $deferred,
+        ?string $message = null,
+        ?int $attempts = null
+    ): bool {
+        $jobClass = JobTypeControlService::extractJobClassFromTask($this->job->task ?? []);
+        $controls = new JobTypeControlService();
+        if (!$controls->isJobTypeDisabled($jobClass)) {
+            return false;
+        }
+
+        $controls->markJobDocumentDisabled($this->job);
+        JobExecutionDocument::log([
+            'jobId'      => (string)$this->job->id,
+            'workerId'   => $this->worker->getId(),
+            'employer'   => $this->job->employer ?? 'unknown',
+            'startedAt'  => new \MongoDB\BSON\UTCDateTime($this->startedAt),
+            'finishedAt' => new \MongoDB\BSON\UTCDateTime(new \DateTimeImmutable()),
+            'execution_time' => $this->startedAt->diff(new \DateTimeImmutable())->format('%H:%I:%S.%f'),
+            'status'     => JobTypeControlService::JOB_STATUS_DISABLED,
+            'error'      => trim($message ?? '') !== '' ? $message : "Job type disabled {$context}",
+            'attempts'   => $attempts,
+        ]);
+        $this->queue->handleJobTerminal(
+            $this->job,
+            $this->worker->getId(),
+            JobTypeControlService::JOB_STATUS_DISABLED,
+            trim($message ?? '') !== '' ? $message : "Job type disabled {$context}"
+        );
+        $deferred->resolve([
+            'status' => JobTypeControlService::JOB_STATUS_DISABLED,
+            'message' => "Job type disabled {$context}",
+            'attempts' => $attempts,
+        ]);
+
+        return true;
     }
 }

@@ -25,7 +25,7 @@ class SendGridAdapter extends AbstractEmailProvider
             throw new \RuntimeException('SendGrid API key is required');
         }
         
-        $this->sendGrid = new SendGrid($apiKey);
+        $this->sendGrid = new \SendGrid($apiKey);
     }
 
     /**
@@ -45,7 +45,8 @@ class SendGridAdapter extends AbstractEmailProvider
         string $htmlBody,
         ?string $textBody = null,
         ?string $fromEmail = null,
-        ?string $fromName = null
+        ?string $fromName = null,
+        array $options = []
     ): bool {
         try {
             $fromEmail = $fromEmail ?? $this->getConfig('from_email');
@@ -59,6 +60,12 @@ class SendGridAdapter extends AbstractEmailProvider
             $email->setFrom($fromEmail, $fromName);
             $email->setSubject($subject);
             $email->addTo($to);
+            foreach ((array)($options['bcc'] ?? []) as $bccEmail) {
+                $bccEmail = trim((string)$bccEmail);
+                if ($bccEmail !== '') {
+                    $email->addBcc($bccEmail);
+                }
+            }
             $email->addContent('text/html', $htmlBody);
             
             if ($textBody !== null) {

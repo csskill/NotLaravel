@@ -3,9 +3,6 @@
 namespace Nraa\Workers;
 
 use React\Promise\Deferred;
-use React\EventLoop\Loop;
-use Nraa\Workers\Documents\JobExecutionDocument;
-use Nraa\Workers\JobRetryStrategy;
 
 class JobPool
 {
@@ -32,34 +29,19 @@ class JobPool
     /**
      * Enqueue a new task to be executed by a worker process.
      *
-     * The task is a callable that will be executed by a worker process.
-     * The job is the associated job document.
-     * The maxRetries parameter sets the maximum number of times to retry the job if it fails.
-     * The attempt parameter sets the current attempt number.
-     *
-     * The method returns a promise that will be resolved or rejected by the job execution process.
-     * The promise will be resolved with the result of the job or rejected with an exception if the job fails.
-     *
-     * If the job is retried, the next attempt will be scheduled after a fixed delay:
-     * - Attempt 1: 30 seconds
-     * - Attempt 2: 60 seconds (1 minute)
-     * - Attempt 3: 120 seconds (2 minutes)
-     * If the job is retried after the maximum number of attempts, the job will be marked as failed and the promise will be rejected with an exception.
+     * Retry semantics are owned by JobExecution; this pool only handles concurrency.
      *
      * @param callable $task The task to be executed by a worker process.
      * @param mixed $job The associated job document.
-     * @param int $maxAttempts The maximum number of attempts (defaults to job's maxAttempts or 3).
-     * @param int $attempt The current attempt number (1-based).
+     * @param int $maxAttempts Reserved for compatibility with existing callers.
+     * @param int $attempt Reserved for compatibility with existing callers.
      * @return \React\Promise\PromiseInterface The promise that will be resolved or rejected by the job execution process.
      */
     public function enqueue(callable $task, $job, ?int $maxAttempts = null, int $attempt = 1): \React\Promise\PromiseInterface
     {
         $deferred = new Deferred();
 
-        // Use job's maxAttempts if not provided, default to 3
-        $maxAttempts = $maxAttempts ?? $job->maxAttempts ?? 3;
-        
-        $wrapper = function () use ($task, $job, $deferred, $maxAttempts, $attempt) {
+        $wrapper = function () use ($task, $job, $deferred) {
             $this->running++;
 
             try {
@@ -78,52 +60,18 @@ class JobPool
             }
 
             $promise->then(
-                function ($result) use ($job, $deferred, $attempt) {
+                function ($result) use ($deferred) {
                     $this->running--;
-
-                    JobExecutionDocument::log([
-                        'jobId'      => (string)$job->id,
-                        'workerId'   => $this->worker->getId(),
-                        'employer'   => $job->employer ?? 'unknown',
-                        'startedAt'  => new \MongoDB\BSON\UTCDateTime(new \DateTimeImmutable()),
-                        'finishedAt' => new \MongoDB\BSON\UTCDateTime(new \DateTimeImmutable()),
-                        'status'     => 'completed',
-                        'attempt'    => $attempt,
-                        'result'     => $result,
-                    ]);
 
                     // Status already updated by JobExecution::executeAsync()
                     $deferred->resolve($result);
                     $this->next();
                 },
-                function ($error) use ($task, $job, $deferred, $maxAttempts, $attempt) {
+                function ($error) use ($deferred) {
                     $this->running--;
 
-                    JobExecutionDocument::log([
-                        'jobId'      => (string)$job->id,
-                        'workerId'   => $this->worker->getId(),
-                        'employer'   => $job->employer ?? 'unknown',
-                        'startedAt'  => new \MongoDB\BSON\UTCDateTime(new \DateTimeImmutable()),
-                        'finishedAt' => new \MongoDB\BSON\UTCDateTime(new \DateTimeImmutable()),
-                        'status'     => 'failed',
-                        'attempt'    => $attempt,
-                        'error'      => $error->getMessage(),
-                    ]);
-
-                    if (JobRetryStrategy::shouldRetry($attempt, $maxAttempts)) {
-                        $delay = JobRetryStrategy::getDelay($attempt);
-                        echo "⚠️ Job {$job->id} failed (attempt {$attempt}/{$maxAttempts}). Retrying in {$delay}s...\n";
-                        echo "Error: {$error->getMessage()}\n";
-                        echo "{$error->getTraceAsString()}\n";
-                        Loop::addTimer($delay, function () use ($task, $job, $deferred, $maxAttempts, $attempt) {
-                            $this->enqueue($task, $job, $maxAttempts, $attempt + 1)
-                                ->then([$deferred, 'resolve'], [$deferred, 'reject']);
-                        });
-                    } else {
-                        echo "❌ Job {$job->id} failed after {$attempt} attempts (max: {$maxAttempts})\n";
-                        // Status already updated by JobExecution::executeAsync()
-                        $deferred->reject($error);
-                    }
+                    // Retry and attempt accounting are handled in JobExecution.
+                    $deferred->reject($error);
 
                     $this->next();
                 }

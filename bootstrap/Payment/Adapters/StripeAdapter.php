@@ -51,30 +51,56 @@ class StripeAdapter extends AbstractPaymentGateway
     }
 
     /**
-     * Create a subscription
-     * 
+     * Create a subscription.
+     *
      * @param string $customerId
      * @param string $priceId
+     * @param array $options
      * @return array
      */
-    public function createSubscription(string $customerId, string $priceId): array
+    public function createSubscription(string $customerId, string $priceId, array $options = []): array
     {
-        $subscription = $this->stripe->subscriptions->create([
+        $params = [
             'customer' => $customerId,
             'items' => [
                 ['price' => $priceId],
             ],
-            'payment_behavior' => 'default_incomplete',
-            'payment_settings' => ['save_default_payment_method' => 'on_subscription'],
+            'payment_behavior' => (string)($options['payment_behavior'] ?? 'allow_incomplete'),
             'expand' => ['latest_invoice.payment_intent'],
-        ]);
+        ];
+
+        if (isset($options['trial_end'])) {
+            $trialEnd = (int)$options['trial_end'];
+            if ($trialEnd > 0) {
+                $params['trial_end'] = $trialEnd;
+            }
+        }
+
+        if (isset($options['trial_settings']) && is_array($options['trial_settings'])) {
+            $params['trial_settings'] = $options['trial_settings'];
+        }
+
+        if (isset($options['metadata']) && is_array($options['metadata'])) {
+            $params['metadata'] = $options['metadata'];
+        }
+
+        if (isset($options['payment_settings']) && is_array($options['payment_settings'])) {
+            $params['payment_settings'] = $options['payment_settings'];
+        }
+
+        $subscription = $this->stripe->subscriptions->create($params);
+        $subscriptionArray = $subscription->toArray();
+        $periodEnd = $this->extractSubscriptionPeriodBoundary($subscriptionArray, 'end');
+        $periodStart = $this->extractSubscriptionPeriodBoundary($subscriptionArray, 'start');
 
         return [
-            'subscription_id' => $subscription->id,
-            'status' => $subscription->status,
-            'customer_id' => $subscription->customer,
-            'current_period_end' => $subscription->current_period_end,
-            'current_period_start' => $subscription->current_period_start,
+            'subscription_id' => (string)$subscription->id,
+            'status' => (string)$subscription->status,
+            'customer_id' => (string)$subscription->customer,
+            'current_period_end' => $periodEnd,
+            'current_period_start' => $periodStart,
+            'trial_end' => isset($subscriptionArray['trial_end']) ? (int)$subscriptionArray['trial_end'] : null,
+            'raw' => $subscriptionArray,
         ];
     }
 
@@ -120,14 +146,19 @@ class StripeAdapter extends AbstractPaymentGateway
     public function getSubscription(string $subscriptionId): array
     {
         $subscription = $this->stripe->subscriptions->retrieve($subscriptionId);
+        $subscriptionArray = $subscription->toArray();
+        $periodEnd = $this->extractSubscriptionPeriodBoundary($subscriptionArray, 'end');
+        $periodStart = $this->extractSubscriptionPeriodBoundary($subscriptionArray, 'start');
 
         return [
             'subscription_id' => $subscription->id,
             'status' => $subscription->status,
             'customer_id' => $subscription->customer,
-            'current_period_end' => $subscription->current_period_end,
-            'current_period_start' => $subscription->current_period_start,
+            'current_period_end' => $periodEnd,
+            'current_period_start' => $periodStart,
+            'trial_end' => isset($subscriptionArray['trial_end']) ? (int)$subscriptionArray['trial_end'] : null,
             'cancel_at_period_end' => $subscription->cancel_at_period_end,
+            'raw' => $subscriptionArray,
         ];
     }
 
@@ -171,9 +202,9 @@ class StripeAdapter extends AbstractPaymentGateway
      * @param string $cancelUrl
      * @return string Checkout session URL
      */
-    public function createCheckoutSession(string $customerId, string $priceId, string $successUrl, string $cancelUrl): string
+    public function createCheckoutSession(string $customerId, string $priceId, string $successUrl, string $cancelUrl, array $options = []): string
     {
-        $session = $this->stripe->checkout->sessions->create([
+        $params = [
             'customer' => $customerId,
             'mode' => 'subscription',
             'line_items' => [
@@ -185,7 +216,22 @@ class StripeAdapter extends AbstractPaymentGateway
             'success_url' => $successUrl,
             'cancel_url' => $cancelUrl,
             'allow_promotion_codes' => true,
-        ]);
+        ];
+
+        $metadata = is_array($options['metadata'] ?? null) ? $options['metadata'] : [];
+        if ($metadata !== []) {
+            $params['metadata'] = $metadata;
+            $params['subscription_data'] = [
+                'metadata' => $metadata,
+            ];
+        }
+
+        $clientReferenceId = trim((string)($options['client_reference_id'] ?? ''));
+        if ($clientReferenceId !== '') {
+            $params['client_reference_id'] = $clientReferenceId;
+        }
+
+        $session = $this->stripe->checkout->sessions->create($params);
 
         return $session->url;
     }
@@ -198,5 +244,95 @@ class StripeAdapter extends AbstractPaymentGateway
     public function getStripeClient(): StripeClient
     {
         return $this->stripe;
+    }
+
+    /**
+     * @inheritDoc
+     */
+    public function refundPayment(array $input): array
+    {
+        $paymentIntentId = trim((string)($input['payment_intent_id'] ?? ''));
+        $chargeId = trim((string)($input['charge_id'] ?? ''));
+
+        if ($paymentIntentId === '' && $chargeId === '') {
+            throw new \InvalidArgumentException('Stripe refund requires payment_intent_id or charge_id.');
+        }
+
+        $amountMinor = isset($input['amount_minor']) ? (int)$input['amount_minor'] : null;
+        if ($amountMinor !== null && $amountMinor <= 0) {
+            throw new \InvalidArgumentException('Stripe refund amount_minor must be positive when provided.');
+        }
+
+        $params = [
+            'reason' => trim((string)($input['reason'] ?? 'requested_by_customer')) ?: 'requested_by_customer',
+            'metadata' => is_array($input['metadata'] ?? null) ? $input['metadata'] : [],
+        ];
+
+        if ($paymentIntentId !== '') {
+            $params['payment_intent'] = $paymentIntentId;
+        } else {
+            $params['charge'] = $chargeId;
+        }
+        if ($amountMinor !== null) {
+            $params['amount'] = $amountMinor;
+        }
+
+        $requestOptions = [];
+        $idempotencyKey = trim((string)($input['idempotency_key'] ?? ''));
+        if ($idempotencyKey !== '') {
+            $requestOptions['idempotency_key'] = $idempotencyKey;
+        }
+
+        $refund = $this->stripe->refunds->create($params, $requestOptions);
+        $gatewayStatus = strtolower(trim((string)($refund->status ?? '')));
+
+        $status = match ($gatewayStatus) {
+            'succeeded' => 'succeeded',
+            'pending' => 'pending',
+            'requires_action' => 'requires_action',
+            'failed', 'canceled' => 'failed',
+            default => $gatewayStatus !== '' ? $gatewayStatus : 'pending',
+        };
+
+        return [
+            'ok' => in_array($status, ['succeeded', 'pending', 'requires_action'], true),
+            'gateway_refund_id' => (string)($refund->id ?? ''),
+            'status' => $status,
+            'amount_minor' => (int)($refund->amount ?? ($amountMinor ?? 0)),
+            'currency' => strtoupper((string)($refund->currency ?? ($input['currency'] ?? 'USD'))),
+            'raw' => $refund->toArray(),
+        ];
+    }
+
+    private function extractSubscriptionPeriodBoundary(array $subscription, string $boundary): ?int
+    {
+        $key = $boundary === 'start' ? 'current_period_start' : 'current_period_end';
+        $itemBoundary = $subscription['items']['data'][0][$key] ?? null;
+        if (is_int($itemBoundary) && $itemBoundary > 0) {
+            return $itemBoundary;
+        }
+        if (is_numeric($itemBoundary) && (int)$itemBoundary > 0) {
+            return (int)$itemBoundary;
+        }
+
+        $topLevelBoundary = $subscription[$key] ?? null;
+        if (is_int($topLevelBoundary) && $topLevelBoundary > 0) {
+            return $topLevelBoundary;
+        }
+        if (is_numeric($topLevelBoundary) && (int)$topLevelBoundary > 0) {
+            return (int)$topLevelBoundary;
+        }
+
+        if ($boundary === 'end') {
+            $trialEnd = $subscription['trial_end'] ?? null;
+            if (is_int($trialEnd) && $trialEnd > 0) {
+                return $trialEnd;
+            }
+            if (is_numeric($trialEnd) && (int)$trialEnd > 0) {
+                return (int)$trialEnd;
+            }
+        }
+
+        return null;
     }
 }

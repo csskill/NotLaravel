@@ -62,12 +62,14 @@ class TwigLoader
         $router = Router::getInstance();
         $templateDir = $router->getTemplateRoute();
         $cacheDir = $router->getCacheDir();
+        $isDebug = filter_var($_ENV['DEBUG'] ?? 'false', FILTER_VALIDATE_BOOLEAN);
+        $disableTwigCache = filter_var($_ENV['TWIG_CACHE_DISABLED'] ?? 'false', FILTER_VALIDATE_BOOLEAN);
         $loader = new FilesystemLoader($templateDir);
         $twigEnvironment = new Environment($loader, [
-            //'cache' => $cacheDir, Disable during testing
-            'cache' => false,
-            'debug' => true,
-            'auto_reload' => true,
+            // Keep cache enabled by default for request throughput; disable only when explicitly requested.
+            'cache' => $disableTwigCache ? false : $cacheDir,
+            'debug' => $isDebug,
+            'auto_reload' => $isDebug,
             'strict_variables' => false,
             'charset' => 'UTF-8',
             'autoescape' => false,

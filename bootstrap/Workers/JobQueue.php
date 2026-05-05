@@ -2,88 +2,44 @@
 
 namespace Nraa\Workers;
 
+use MongoDB\BSON\ObjectId;
+use MongoDB\BSON\UTCDateTime;
+use Nraa\Workers\Contracts\QueueTransportInterface;
+use Nraa\Workers\Documents\JobExecutionDocument;
 use Nraa\Workers\Documents\JobDocument;
-use Nraa\Workers\JobRetryStrategy;
-use MongoDB\Collection;
+use Nraa\Workers\Transports\MongoQueueTransport;
+use Nraa\Workers\Transports\RedisStreamsQueueTransport;
 
 class JobQueue
 {
+    private QueueTransportInterface $transport;
+    private JobRealtimeStateService $realtimeState;
 
-    private Collection $collection;
-
-    public function __construct()
+    public function __construct(?QueueTransportInterface $transport = null)
     {
-        $db = new \Nraa\Database\Drivers\MongoDBDriver();
-        $this->collection = $db->getCollection('jobs');
+        $this->transport = $transport ?? $this->resolveTransport();
+        $this->realtimeState = JobRealtimeStateService::getInstance();
+    }
+
+    public function getTransport(): QueueTransportInterface
+    {
+        return $this->transport;
+    }
+
+    public function getRealtimeState(): JobRealtimeStateService
+    {
+        return $this->realtimeState;
     }
 
     /**
-     * Atomically fetch and update a queued job for the given worker.
-     * This method will return the next job assigned to the given worker, or null if none is found.
-     * The job will be marked as 'in_progress' and its 'startedAt' attribute will be set to the current time.
-     *
-     * @param string $workerId The ID of the worker to fetch the job for.
-     * @return JobDocument|null The next job assigned to the worker, or null if none is found.
+     * Atomically claim the next job already assigned to a worker.
      */
-    public function getNextJob($workerId)
+    public function getNextJob(string $workerId, ?string $poolName = null, ?array $workerConfig = null): ?JobDocument
     {
-        // Use Model's instance method for atomic findOneAndUpdate
-        // This ensures consistency with the Model system and proper type mapping
-        $instance = new JobDocument();
-
-        $filter = [
-            'status'   => 'assigned',
-            'assignee' => $workerId,
-        ];
-
         try {
-            // Use Model's findOneAndUpdate (from trait) for atomic operation
-            $result = $instance->findOneAndUpdate(
-                $filter,
-                ['$set' => ['status' => 'in_progress', 'startedAt' => new \MongoDB\BSON\UTCDateTime()]],
-                [
-                    'sort' => ['createdAt' => 1],
-                    'returnDocument' => \MongoDB\Operation\FindOneAndUpdate::RETURN_DOCUMENT_AFTER
-                ]
-            );
-
-            if (!$result) {
-                return null;
-            }
-
-            // Extract the ID from the result
-            $id = null;
-            if (is_array($result) && isset($result['_id'])) {
-                $id = $result['_id'];
-            } elseif ($result instanceof \MongoDB\Model\BSONDocument && isset($result['_id'])) {
-                $id = $result['_id'];
-            } elseif ($result instanceof \stdClass && isset($result->_id)) {
-                $id = $result->_id;
-            } elseif ($result instanceof JobDocument) {
-                // If typeMap auto-hydrated, return it directly
-                return $result;
-            }
-
-            if (!$id) {
-                return null;
-            }
-
-            // Ensure ID is an ObjectId instance
-            if (!($id instanceof \MongoDB\BSON\ObjectId)) {
-                if (is_array($id)) {
-                    $id = new \MongoDB\BSON\ObjectId($id['$oid'] ?? $id);
-                } else {
-                    $id = new \MongoDB\BSON\ObjectId((string)$id);
-                }
-            }
-
-            // Use Model's findOne() for proper hydration
-            $job = JobDocument::findOne(['_id' => $id]);
-
-            if (!$job) {
-                $idString = (string)$id;
-                echo "[" . date('H:i:s') . "] ⚠️ Worker {$workerId}: Job {$idString} found by findOneAndUpdate but not found by findOne!\n";
-                return null;
+            $job = $this->transport->claimNextJob($workerId, trim((string)$poolName) ?: 'general', $workerConfig);
+            if ($job instanceof JobDocument) {
+                $this->realtimeState->recordStarted($job, $workerId);
             }
 
             return $job;
@@ -95,33 +51,21 @@ class JobQueue
     }
 
     /**
-     * Enqueue a new job.
-     *
-     * @param array|object $jobData The job data to enqueue.
-     * @param bool $preventDuplicates If true, check for existing jobs before enqueuing
-     * @return JobDocument The enqueued job document.
+     * Enqueue a new job into the active queue transport.
      */
-    public function enqueue(array|object $jobData, bool $preventDuplicates = true): JobDocument
+    public function enqueue(array|object $jobData, bool $preventDuplicates = true): ?JobDocument
     {
-        // Check for duplicate jobs if idempotency_key is provided and preventDuplicates is true
-        if ($preventDuplicates && isset($jobData['idempotency_key'])) {
-            $existingJob = JobDocument::findOne([
-                'idempotency_key' => $jobData['idempotency_key'],
-                'status' => ['$in' => ['pending', 'assigned', 'in_progress']]
-            ]);
-
-            if ($existingJob) {
-                return $existingJob;
-            }
+        $payload = is_array($jobData) ? $jobData : (array)$jobData;
+        $job = $this->transport->enqueue($payload, $preventDuplicates);
+        if ($job instanceof JobDocument) {
+            $this->realtimeState->recordQueued($payload, (string)$job->id);
         }
 
-        return JobDocument::create($jobData);
+        return $job;
     }
 
     /**
-     * Fetch all jobs from the database.
-     *
-     * @return iterable The iterable list of JobDocument objects.
+     * @return iterable<JobDocument>
      */
     public function fetchAll(): iterable
     {
@@ -129,156 +73,189 @@ class JobQueue
     }
 
     /**
-     * Fetch all pending jobs from the database.
+     * Legacy helper retained for backward compatibility.
      *
-     * @param int $limit The limit of jobs to fetch. Defaults to 10.
-     * @return iterable The iterable list of JobDocument objects.
+     * @return iterable<JobDocument>
      */
     public function fetchPending(int $limit = 10): iterable
     {
-        $now = new \DateTimeImmutable();
-
-        return JobDocument::find(
-            [
-                'status' => 'pending',
-                'nextRunAt' => ['$lte' => new \MongoDB\BSON\UTCDateTime($now)],
-            ],
-            [
-                'limit' => $limit,
-                'sort' => ['createdAt' => 1],
-            ]
-        )->toArray();
+        return $this->fetchPendingForPool('general', $limit);
     }
 
     /**
-     * Mark a job as assigned to a given worker.
-     *
-     * @param string $jobId The ID of the job to mark as assigned.
-     * @param string $workerId The ID of the worker to assign the job to.
+     * @return iterable<JobDocument>
      */
-    public function markAssigned(string $jobId, string $workerId): void
+    public function fetchPendingForPool(string $poolName, int $limit = 10, ?\DateTimeImmutable $now = null): iterable
     {
-        $instance = new JobDocument();
+        return $this->transport->fetchPendingForPool($poolName, $limit, $now);
+    }
 
-        // Use atomic findOneAndUpdate to prevent race conditions
-        // Only update if status is still 'pending' (not already assigned)
-        $filter = [
-            '_id' => new \MongoDB\BSON\ObjectId($jobId),
-            'status' => 'pending'  // Only assign if still pending
-        ];
+    public function supportsDispatcherAssignments(): bool
+    {
+        return $this->transport->supportsDispatcherAssignments();
+    }
 
-        $update = [
-            '$set' => [
-                'status' => 'assigned',
-                'assignee' => $workerId,
-                'assignedAt' => new \MongoDB\BSON\UTCDateTime(new \DateTimeImmutable())
-            ]
-        ];
+    /**
+     * @param array<int, string>|null $poolNames
+     * @return array<string, int>
+     */
+    public function releaseDueJobs(?array $poolNames = null, ?\DateTimeImmutable $now = null): array
+    {
+        return $this->transport->releaseDueJobs($poolNames, $now);
+    }
 
+    /**
+     * @param array<int, string> $jobIds
+     */
+    public function reconcileJobs(array $jobIds, ?\DateTimeImmutable $now = null): int
+    {
+        return $this->transport->reconcileJobs($jobIds, $now);
+    }
+
+    public function markAssigned(string $jobId, string $workerId, ?array $instructions = null): bool
+    {
         try {
-            echo "[" . date('H:i:s') . "] Marking job (" . $jobId . ") assigned to " . $workerId . " \n";
-
-            $result = $instance->findOneAndUpdate(
-                $filter,
-                $update,
-                [
-                    'returnDocument' => \MongoDB\Operation\FindOneAndUpdate::RETURN_DOCUMENT_AFTER
-                ]
-            );
-
-            if (!$result) {
-                // Job not found or already assigned - verify current state
-                $verify = JobDocument::findOne(['_id' => new \MongoDB\BSON\ObjectId($jobId)]);
-                if ($verify) {
-                    if ($verify->status === 'assigned' || $verify->status === 'in_progress') {
-                        echo "[" . date('H:i:s') . "] ⚠️  Job {$jobId} already assigned to " . ($verify->assignee ?? 'unknown') . " (status: {$verify->status})\n";
-                    } else {
-                        echo "[" . date('H:i:s') . "] ❌ Job {$jobId} assignment failed - unexpected status: {$verify->status}\n";
-                    }
-                } else {
-                    echo "[" . date('H:i:s') . "] ❌ Job {$jobId} not found\n";
-                }
-                return;
-            }
-
-            // Success - verify the assignment
-            $verify = JobDocument::findOne(['_id' => new \MongoDB\BSON\ObjectId($jobId)]);
-            if ($verify && $verify->assignee !== $workerId) {
-                echo "[" . date('H:i:s') . "] ⚠️ WARNING: Job {$jobId} assignee not saved correctly! Expected: {$workerId}, Got: " . ($verify->assignee ?? 'null') . "\n";
-            } else {
-                echo "[" . date('H:i:s') . "] ✓ Job {$jobId} successfully assigned to {$workerId}\n";
-            }
-        } catch (\Exception $e) {
+            return $this->transport->markAssigned($jobId, $workerId, $instructions);
+        } catch (\Throwable $e) {
             echo "[" . date('H:i:s') . "] ❌ Error saving job assignment: {$e->getMessage()}\n";
             echo "{$e->getTraceAsString()}\n";
+            return false;
         }
     }
 
+    /**
+     * Used by the dispatcher to keep assignment capacity calculations O(workers + job classes).
+     *
+     * @param array<int, string> $workerIds
+     * @return array<string, int>
+     */
+    public function getActiveWorkerLoadMap(array $workerIds): array
+    {
+        return $this->transport->getActiveWorkerLoadMap($workerIds);
+    }
 
     /**
-     * Mark a job as completed.
-     *
-     * This method will mark the job with the given ID as completed and remove any transient state.
-     * If the job does not exist, this method will do nothing.
-     *
-     * @param string $jobId The ID of the job to mark as completed.
+     * @param array<int, string> $jobClasses
+     * @return array<string, int>
      */
+    public function getActiveJobClassLoadMap(array $jobClasses): array
+    {
+        return $this->transport->getActiveJobClassLoadMap($jobClasses);
+    }
+
+    public function recordAssigned(JobDocument $job, string $workerId): void
+    {
+        $this->realtimeState->recordAssigned($job, $workerId);
+    }
+
+    public function reconcileWorkerCrash(string $workerId, string $errorMessage, ?\DateTimeImmutable $finishedAt = null): int
+    {
+        $workerId = trim($workerId);
+        if ($workerId === '') {
+            return 0;
+        }
+
+        $finishedAt ??= new \DateTimeImmutable();
+        $jobs = JobDocument::find([
+            'assignee' => $workerId,
+            'status' => ['$in' => ['assigned', 'in_progress']],
+        ], [
+            'sort' => [
+                'assignedAt' => 1,
+                'startedAt' => 1,
+                'createdAt' => 1,
+            ],
+        ])->toArray();
+
+        $reconciled = 0;
+        foreach ($jobs as $job) {
+            if (!$job instanceof JobDocument) {
+                continue;
+            }
+
+            try {
+                $this->reconcileCrashedJob($job, $workerId, $errorMessage, $finishedAt);
+                $reconciled++;
+            } catch (\Throwable $e) {
+                $jobId = trim((string)($job->id ?? ''));
+                echo "❌ Failed to reconcile crashed job {$jobId} for {$workerId}: {$e->getMessage()}\n";
+            }
+        }
+
+        return $reconciled;
+    }
+
+    public function handleJobCompleted(JobDocument $job, string $workerId): void
+    {
+        try {
+            $this->realtimeState->recordCompleted($job, $workerId);
+            $this->transport->afterJobCompleted($job, $workerId);
+        } catch (\Throwable $e) {
+            echo "❌ Failed to finalize completed job {$job->id}: {$e->getMessage()}\n";
+        }
+    }
+
+    public function handleJobRequeued(JobDocument $job, string $workerId, int $delaySeconds, string $errorMessage): void
+    {
+        try {
+            $this->realtimeState->recordRequeued($job, $workerId, $delaySeconds, $errorMessage);
+            $this->transport->afterJobRequeued($job, $workerId, $delaySeconds, $errorMessage);
+        } catch (\Throwable $e) {
+            echo "❌ Failed to finalize requeued job {$job->id}: {$e->getMessage()}\n";
+        }
+    }
+
+    public function handleJobTerminal(JobDocument $job, string $workerId, string $status, ?string $errorMessage = null): void
+    {
+        try {
+            $this->realtimeState->recordTerminal($job, $workerId, $status, $errorMessage);
+            $this->transport->afterJobTerminal($job, $workerId, $status, $errorMessage);
+        } catch (\Throwable $e) {
+            echo "❌ Failed to finalize terminal job {$job->id}: {$e->getMessage()}\n";
+        }
+    }
+
+    public function syncRealtimeSnapshot(): void
+    {
+        $this->realtimeState->syncSnapshotFromMongo();
+    }
+
     public function markCompleted(string $jobId): void
     {
         try {
-            $job = JobDocument::findOne(['_id' => new \MongoDB\BSON\ObjectId($jobId)]);
+            $job = JobDocument::findOne(['_id' => new ObjectId($jobId)]);
             if (!$job) {
                 return;
             }
 
-            $job->status = 'completed';
-            $job->completedAt = new \MongoDB\BSON\UTCDateTime(new \DateTimeImmutable());
-
-            // clear transient state
-            $job->assignee = null;
-            $job->error = null;
-
-            $job->save();
+            $workerId = (string)($job->assignee ?? '');
+            $job->markCompleted();
+            $this->handleJobCompleted($job, $workerId);
 
             echo "✅ Job {$job->id} marked as completed\n";
-        } catch (\Exception $e) {
+        } catch (\Throwable $e) {
             echo "❌ Job {$jobId} failed: {$e->getMessage()}\n";
             echo "{$e->getTraceAsString()}\n";
         }
     }
 
-
-    /**
-     * Mark a job as in_progress.
-     *
-     * This method will mark the job with the given ID as in_progress and update the completedAt field.
-     * If the job does not exist, this method will do nothing.
-     *
-     * @param string $jobId The ID of the job to mark as in_progress.
-     */
     public function markInProgress(string $jobId): void
     {
-        $job = JobDocument::findOne(['_id' => new \MongoDB\BSON\ObjectId($jobId)]);
-        if ($job) {
-            $job->status      = 'in_progress';
-            echo "[" . date('H:i:s') . "] job ({$jobId}) as in_progress \n";
-            $job->completedAt = new \MongoDB\BSON\UTCDateTime(new \DateTimeImmutable());
-            $job->save();
+        $job = JobDocument::findOne(['_id' => new ObjectId($jobId)]);
+        if (!$job) {
+            return;
         }
+
+        $job->status = 'in_progress';
+        $job->updatedAt = new \MongoDB\BSON\UTCDateTime(new \DateTimeImmutable());
+        echo "[" . date('H:i:s') . "] job ({$jobId}) as in_progress \n";
+        $job->save();
+        $this->realtimeState->recordStarted($job, (string)($job->assignee ?? ''));
     }
 
-    /**
-     * Set the priority of a job.
-     *
-     * This method sets the priority of the job with the given ID.
-     * If the job does not exist, this method will do nothing.
-     *
-     * @param string $jobId The ID of the job to set the priority of.
-     * @param int    $priority The new priority of the job.
-     */
     public function setPriority(string $jobId, int $priority): void
     {
-        $job = JobDocument::findOne(['_id' => new \MongoDB\BSON\ObjectId($jobId)]);
+        $job = JobDocument::findOne(['_id' => new ObjectId($jobId)]);
         if ($job) {
             $job->priority = $priority;
             $job->save();
@@ -286,64 +263,152 @@ class JobQueue
     }
 
     /**
-     * Fetch jobs assigned to a given worker.
-     *
-     * @param string $workerId
-     * @param int    $limit
-     * @return iterable
+     * @return iterable<JobDocument>
      */
     public function fetchAssigned(string $workerId, int $limit = 10): iterable
     {
         $jobs = JobDocument::find([
-            'status'   => 'assigned',
+            'status' => 'assigned',
             'assignee' => $workerId,
+        ], [
+            'limit' => $limit,
+            'sort' => [
+                'priority' => -1,
+                'assignedAt' => 1,
+                'createdAt' => 1,
+            ],
         ])->toArray();
 
-        $i = 0;
         foreach ($jobs as $job) {
-            if ($i >= $limit) break;
             yield $job;
-            $i++;
         }
     }
 
-    /**
-     * Mark a job as failed.
-     *
-     * This method marks a job as failed and increases its attempt count.
-     * If the job has not exceeded the maximum number of attempts, it will be rescheduled to run again after a fixed delay.
-     * Uses unified retry strategy: 30s, 60s, 120s delays.
-     *
-     * If the job has exceeded the maximum number of attempts, it will be marked as permanently failed.
-     *
-     * @param string $jobId The ID of the job to mark as failed.
-     * @param string $errorMessage The error message to store with the job.
-     */
     public function markFailed(string $jobId, string $errorMessage): void
     {
-        $job = JobDocument::findOne(['_id' => new \MongoDB\BSON\ObjectId($jobId)]);
+        $job = JobDocument::findOne(['_id' => new ObjectId($jobId)]);
         if (!$job) {
             return;
         }
 
-        $job->attempts = ($job->attempts ?? 0) + 1;
+        $workerId = (string)($job->assignee ?? '');
         $maxAttempts = $job->maxAttempts ?? 3;
+        $job->attempts = min((int)($job->attempts ?? 0) + 1, $maxAttempts);
         $job->error = $errorMessage;
         $job->failedAt = new \MongoDB\BSON\UTCDateTime(new \DateTimeImmutable());
 
         if (JobRetryStrategy::shouldRetry($job->attempts, $maxAttempts)) {
-            // Use unified retry strategy with fixed delays
             $delaySeconds = JobRetryStrategy::getDelay($job->attempts);
             $job->nextRunAt = new \MongoDB\BSON\UTCDateTime((new \DateTimeImmutable())->modify("+{$delaySeconds} seconds"));
-
             $job->status = 'pending';
             $job->assignee = null;
+            $job->assignedAt = null;
+            $job->startedAt = null;
+            $job->lastHeartbeat = null;
+            $job->updatedAt = new \MongoDB\BSON\UTCDateTime(new \DateTimeImmutable());
             echo "♻️ Retrying job {$job->id} in {$delaySeconds}s (attempt {$job->attempts}/{$maxAttempts})\n";
-        } else {
-            $job->status = 'failed';
-            echo "❌ Job {$job->id} permanently failed after {$job->attempts} attempts (max: {$maxAttempts})\n";
+            $job->save();
+            $this->handleJobRequeued($job, $workerId, $delaySeconds, $errorMessage);
+            return;
         }
 
+        echo "❌ Job {$job->id} permanently failed after {$job->attempts} attempts (max: {$maxAttempts})\n";
+        $job->markFailed($errorMessage);
+        $this->handleJobTerminal($job, $workerId, 'failed', $errorMessage);
+    }
+
+    private function reconcileCrashedJob(
+        JobDocument $job,
+        string $workerId,
+        string $errorMessage,
+        \DateTimeImmutable $finishedAt
+    ): void {
+        $maxAttempts = max(1, (int)($job->maxAttempts ?? 3));
+        $attempts = min((int)($job->attempts ?? 0) + 1, $maxAttempts);
+        $startedAt = $this->resolveExecutionStartedAt($job, $finishedAt);
+
+        $job->attempts = $attempts;
+        $job->error = $errorMessage;
+        $job->assignee = null;
+        $job->assignedAt = null;
+        $job->startedAt = null;
+        $job->lastHeartbeat = null;
+        $job->completedAt = null;
+
+        if (JobRetryStrategy::shouldRetry($attempts, $maxAttempts)) {
+            $delaySeconds = JobRetryStrategy::getDelay($attempts);
+            $job->status = 'pending';
+            $job->failedAt = null;
+            $job->terminalAt = null;
+            $job->nextRunAt = new UTCDateTime($finishedAt->modify("+{$delaySeconds} seconds"));
+            $job->save();
+
+            $this->logCrashExecution($job, $workerId, $startedAt, $finishedAt, 'requeued', $errorMessage, $attempts, $delaySeconds);
+            $this->handleJobRequeued($job, $workerId, $delaySeconds, $errorMessage);
+            return;
+        }
+
+        $finalMessage = $this->buildMaxAttemptsMessage($maxAttempts, $errorMessage);
+        $job->status = 'failed';
+        $job->error = $finalMessage;
+        $job->failedAt = new UTCDateTime($finishedAt);
+        $job->terminalAt = new UTCDateTime($finishedAt);
+        $job->nextRunAt = null;
         $job->save();
+
+        $this->logCrashExecution($job, $workerId, $startedAt, $finishedAt, 'failed', $finalMessage, $attempts);
+        $this->handleJobTerminal($job, $workerId, 'failed', $finalMessage);
+    }
+
+    private function logCrashExecution(
+        JobDocument $job,
+        string $workerId,
+        \DateTimeImmutable $startedAt,
+        \DateTimeImmutable $finishedAt,
+        string $status,
+        string $errorMessage,
+        int $attempts,
+        ?int $nextRetryDelay = null
+    ): void {
+        JobExecutionDocument::log([
+            'jobId' => (string)($job->id ?? ''),
+            'workerId' => $workerId,
+            'employer' => $job->employer ?? 'unknown',
+            'startedAt' => new UTCDateTime($startedAt),
+            'finishedAt' => new UTCDateTime($finishedAt),
+            'execution_time' => $startedAt->diff($finishedAt)->format('%H:%I:%S.%f'),
+            'status' => $status,
+            'error' => $errorMessage,
+            'attempts' => $attempts,
+            'nextRetryDelay' => $nextRetryDelay,
+        ]);
+    }
+
+    private function resolveExecutionStartedAt(JobDocument $job, \DateTimeImmutable $finishedAt): \DateTimeImmutable
+    {
+        foreach ([$job->startedAt ?? null, $job->assignedAt ?? null, $job->createdAt ?? null] as $candidate) {
+            if ($candidate instanceof UTCDateTime) {
+                return \DateTimeImmutable::createFromMutable($candidate->toDateTime());
+            }
+        }
+
+        return $finishedAt;
+    }
+
+    private function buildMaxAttemptsMessage(int $maxAttempts, string $reason): string
+    {
+        $cleanedReason = trim(preg_replace('/\s+Job will be retried\.?$/i', '', $reason) ?? $reason);
+        return "Max attempts exceeded ({$maxAttempts}): {$cleanedReason}. No more retries.";
+    }
+
+    private function resolveTransport(): QueueTransportInterface
+    {
+        $transport = strtolower(trim((string)($_ENV['JOB_QUEUE_TRANSPORT'] ?? getenv('JOB_QUEUE_TRANSPORT') ?: 'mongo')));
+
+        return match ($transport) {
+            '', 'mongo' => new MongoQueueTransport(),
+            'redis-streams' => new RedisStreamsQueueTransport(),
+            default => throw new \RuntimeException("Unsupported job queue transport '{$transport}'"),
+        };
     }
 }

@@ -96,6 +96,16 @@ final class Route
         $this->routeOptions->permissionsRequired = $routeOptions->permissionsRequired;
         $this->routeOptions->authRequired = $routeOptions->authRequired;
         $this->routeOptions->membershipTier = $routeOptions->membershipTier;
+        $this->routeOptions->allowDuringOnboarding = $routeOptions->allowDuringOnboarding;
+    }
+
+    /**
+     * Allows this route to bypass onboarding redirect checks while still authenticated.
+     */
+    public function allowDuringOnboarding(bool $allow = true): self
+    {
+        $this->routeOptions->allowDuringOnboarding = $allow;
+        return $this;
     }
 
     /**
@@ -293,15 +303,13 @@ final class Route
                         $application = Application::getInstance();
                         $service = $application->getAppService($typeName);
                         
-                        // Handle HttpRequest (both namespaces) - use singleton pattern
-                        if ($service === null && ($typeName === 'Nraa\Http\HttpRequest' || $typeName === 'Nraa\Http\HttpRequest')) {
-                            if ($typeName === 'Nraa\Http\HttpRequest') {
-                                // Create wrapper instance and inject route variables
-                                $service = new \Nraa\Http\HttpRequest();
-                                $service->setRouteParams($variables);
-                            } else {
+                        // Always inject current route params into HttpRequest so controllers can reliably read getRouteParam().
+                        if ($typeName === 'Nraa\Http\HttpRequest') {
+                            if (!$service instanceof \Nraa\Http\HttpRequest) {
                                 $service = \Nraa\Http\HttpRequest::getInstance();
                             }
+
+                            $service->setRouteParams($variables);
                         }
                         
                         // HttpResponse is a static helper class - should not be a parameter

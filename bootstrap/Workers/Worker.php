@@ -53,6 +53,16 @@ class Worker
     }
 
     /**
+     * Gets the real slot capacity for this worker identity.
+     *
+     * For process-supervised runner slots this is usually 1.
+     */
+    public function getCapacity(): int
+    {
+        return max(1, $this->capacity);
+    }
+
+    /**
      * Gets the configuration data for this worker.
      *
      * @return array Configuration data (may be empty)
@@ -81,7 +91,7 @@ class Worker
      */
     public function getFreeCapacity(): int
     {
-        return $this->capacity - count($this->jobs);
+        return $this->getCapacity() - count($this->jobs);
     }
 
 
@@ -116,12 +126,17 @@ class Worker
      */
     protected function spawnProcess(): void
     {
-        $this->process = new Process([
-            'php',
-            'nraa',
-            'app:job-runner',
-            $this->id
-        ]);
+        $phpMemoryLimit = trim((string)($_ENV['PHP_MEMORY_LIMIT'] ?? getenv('PHP_MEMORY_LIMIT') ?: ''));
+        $command = ['php'];
+        if ($phpMemoryLimit !== '') {
+            $command[] = '-d';
+            $command[] = 'memory_limit=' . $phpMemoryLimit;
+        }
+        $command[] = 'nraa';
+        $command[] = 'app:job-runner';
+        $command[] = $this->id;
+
+        $this->process = new Process($command);
 
         $this->process->setTimeout(null);
         $this->process->setIdleTimeout(null);
