@@ -17,9 +17,14 @@ use \Nraa\Pillars\Log;
 
 class MongoDBDriver
 {
-    private static $instance = null;
+    public const CONNECTION_PRIMARY = 'primary';
+    public const CONNECTION_WEB_READ = 'web_read';
+
+    /** @var array<string,self> */
+    private static array $instances = [];
     private Client $client;
     private \MongoDB\Database $db;
+    private string $connectionName;
 
     /**
      * Initializes a new instance of the MongoDBDriver class.
@@ -27,10 +32,12 @@ class MongoDBDriver
      * @param string $uri The connection URI for the MongoDB instance.
      * @param string $dbName The name of the database to use.
      */
-    function __construct($uri = 'mongodb://localhost:27017', $dbName = 'nraa')
+    function __construct(?string $uri = null, ?string $dbName = null, string $connectionName = self::CONNECTION_PRIMARY)
     {
-        $this->client = new Client($uri);
-        $this->db = $this->client->selectDatabase($dbName);
+        $resolved = self::resolveConnectionConfig($uri, $dbName, $connectionName);
+        $this->client = new Client($resolved['uri']);
+        $this->db = $this->client->selectDatabase($resolved['database']);
+        $this->connectionName = $resolved['connection_name'];
     }
 
     /**
@@ -44,12 +51,13 @@ class MongoDBDriver
      *
      * @return self The singleton instance of the MongoDBDriver class.
      */
-    public static function getInstance($uri = 'mongodb://localhost:27017', $dbName = 'nraa'): self
+    public static function getInstance(?string $uri = null, ?string $dbName = null, string $connectionName = self::CONNECTION_PRIMARY): self
     {
-        if (self::$instance === null) {
-            self::$instance = new MongoDBDriver($uri, $dbName);
+        $resolvedName = self::normalizeConnectionName($connectionName);
+        if (!isset(self::$instances[$resolvedName])) {
+            self::$instances[$resolvedName] = new MongoDBDriver($uri, $dbName, $resolvedName);
         }
-        return self::$instance;
+        return self::$instances[$resolvedName];
     }
 
     /**
@@ -63,16 +71,107 @@ class MongoDBDriver
     }
 
     /**
+     * Returns the MongoDB\Database instance associated with this driver.
+     */
+    public function getDatabase(): \MongoDB\Database
+    {
+        return $this->db;
+    }
+
+    /**
      * Returns the MongoDB\Driver\Manager instance associated with this MongoDBDriver.
      *
      * The manager is used to perform operations on the MongoDB instance.
      *
      * @return MongoDB\Driver\Manager The manager instance.
      */
-    public static function getManager(): Manager
+    public static function getManager(string $connectionName = self::CONNECTION_PRIMARY): Manager
     {
-        $instance = static::getInstance();
+        $instance = static::getInstance(connectionName: $connectionName);
         return $instance->client->getManager();
+    }
+
+    /**
+     * Resolve MongoDB connection details from explicit args, config, and env.
+     *
+     * @return array{uri:string,database:string,connection_name:string}
+     */
+    private static function resolveConnectionConfig(?string $uri, ?string $dbName, string $connectionName): array
+    {
+        $config = [];
+        $configPath = null;
+
+        if (function_exists('app')) {
+            try {
+                $configPath = app()->getAppPath() . '/config/database.php';
+            } catch (\Throwable $e) {
+                $configPath = null;
+            }
+        }
+
+        if (!is_string($configPath) || $configPath === '' || !is_file($configPath)) {
+            $configPath = dirname(__DIR__, 4) . '/app/config/database.php';
+        }
+
+        if (is_file($configPath)) {
+            $loaded = require $configPath;
+            if (is_array($loaded)) {
+                $config = $loaded;
+            }
+        }
+
+        $normalizedName = self::normalizeConnectionName($connectionName);
+        $connectionKey = match ($normalizedName) {
+            self::CONNECTION_WEB_READ => 'mongodb_web_read',
+            default => 'mongodb_primary',
+        };
+
+        $mongodb = is_array($config['connections'][$connectionKey] ?? null)
+            ? $config['connections'][$connectionKey]
+            : (is_array($config['connections']['mongodb'] ?? null) ? $config['connections']['mongodb'] : []);
+
+        $resolvedUri = trim((string)($uri
+            ?? $mongodb['uri']
+            ?? $mongodb['connection_string']
+            ?? $_ENV['MONGODB_CONNECTION_STRING']
+            ?? $_ENV['MONGODB_URI']
+            ?? 'mongodb://localhost:27017'));
+        if ($resolvedUri === '') {
+            $resolvedUri = 'mongodb://localhost:27017';
+        }
+
+        $resolvedDb = trim((string)($dbName
+            ?? $mongodb['database']
+            ?? $_ENV['MONGODB_DATABASE']
+            ?? 'nraa'));
+        if ($resolvedDb === '') {
+            $resolvedDb = 'nraa';
+        }
+
+        return [
+            'uri' => $resolvedUri,
+            'database' => $resolvedDb,
+            'connection_name' => $normalizedName,
+        ];
+    }
+
+    public static function normalizeConnectionName(?string $connectionName): string
+    {
+        $normalized = strtolower(trim((string)$connectionName));
+        return $normalized === self::CONNECTION_WEB_READ ? self::CONNECTION_WEB_READ : self::CONNECTION_PRIMARY;
+    }
+
+    public static function extractConnectionName(array &$options): string
+    {
+        $connectionName = $options['connection'] ?? self::CONNECTION_PRIMARY;
+        unset($options['connection']);
+
+        return self::normalizeConnectionName(is_string($connectionName) ? $connectionName : self::CONNECTION_PRIMARY);
+    }
+
+    public function getConnectionName(): string
+    {
+        return $this->connectionName;
     }
 
     /**
@@ -87,7 +186,9 @@ class MongoDBDriver
     public function bulkInsert($collection_name, $data): mixed
     {
         Log::debug('Performing bulkInsert on collection: ' . $collection_name);
-        $data =  json_decode(json_encode($data), true);
+        if ($this->requiresBulkNormalization($data)) {
+            $data = json_decode(json_encode($data), true);
+        }
         $insertResults = $this->getCollection($collection_name)->insertMany($data, ['ordered' => false, 'rawResult' => true]);
         Log::debug('Result of bulkInsert: ' . (count($insertResults->getInsertedIds()) > 0 ? 'success' : 'failure'));
         return $insertResults->getInsertedIds();
@@ -220,5 +321,30 @@ class MongoDBDriver
         $result = $this->getCollection($collectionName)->deleteMany($filter, $options);
         Log::debug('Result of delete: ' . ($result->getDeletedCount() > 0 ? 'success' : 'failure'));
         return $result;
+    }
+
+    private function requiresBulkNormalization(mixed $data): bool
+    {
+        if (!is_array($data)) {
+            return false;
+        }
+
+        foreach ($data as $document) {
+            if (is_object($document)) {
+                return true;
+            }
+
+            if (!is_array($document)) {
+                continue;
+            }
+
+            foreach ($document as $value) {
+                if (is_object($value)) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
     }
 }

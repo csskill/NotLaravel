@@ -18,13 +18,20 @@ interface PaymentGatewayInterface
     public function createCustomer(User $user): string;
 
     /**
-     * Create a subscription for a customer
-     * 
+     * Create a subscription for a customer.
+     *
      * @param string $customerId The gateway customer ID
      * @param string $priceId The price/product ID for the subscription
+     * @param array{
+     *   trial_end?:int,
+     *   trial_settings?:array<string,mixed>,
+     *   metadata?:array<string,mixed>,
+     *   payment_behavior?:string,
+     *   payment_settings?:array<string,mixed>
+     * } $options Optional gateway-specific options for subscription creation
      * @return array Subscription data including 'subscription_id', 'status', etc.
      */
-    public function createSubscription(string $customerId, string $priceId): array;
+    public function createSubscription(string $customerId, string $priceId, array $options = []): array;
 
     /**
      * Get customer portal URL for managing subscription
@@ -70,4 +77,27 @@ interface PaymentGatewayInterface
      * @return string The checkout session URL
      */
     public function createCheckoutSession(string $customerId, string $priceId, string $successUrl, string $cancelUrl): string;
+
+    /**
+     * Create a payment refund.
+     *
+     * @param array{
+     *   payment_intent_id?:string,
+     *   charge_id?:string,
+     *   amount_minor?:int,
+     *   currency?:string,
+     *   reason?:string,
+     *   metadata?:array<string,mixed>,
+     *   idempotency_key?:string
+     * } $input
+     * @return array{
+     *   ok:bool,
+     *   gateway_refund_id:string,
+     *   status:string,
+     *   amount_minor:int,
+     *   currency:string,
+     *   raw:array<string,mixed>
+     * }
+     */
+    public function refundPayment(array $input): array;
 }

@@ -18,6 +18,8 @@ trait HasRelations
     protected $hasMany;
     protected $hasOne;
     protected $belongsToMany;
+    private static array $relationKeysCache = [];
+    private static array $belongsToManyPivotCache = [];
 
 
     /**
@@ -99,21 +101,7 @@ trait HasRelations
     {
         $this->hasMany = $className;
 
-        // Get the attribute to extract pivot table information
-        $reflection = new \ReflectionClass($this);
-        $pivotTable = null;
-        $pivotForeignKey = null;
-        $pivotRelatedKey = null;
-
-        foreach ($reflection->getProperties() as $property) {
-            foreach ($property->getAttributes(BelongsToMany::class) as $attr) {
-                $args = $attr->getArguments();
-                $pivotTable = $args['pivotTable'] ?? $args[3] ?? null;
-                $pivotForeignKey = $args['pivotForeignKey'] ?? $args[4] ?? null;
-                $pivotRelatedKey = $args['pivotRelatedKey'] ?? $args[5] ?? null;
-                break 2;
-            }
-        }
+        [$pivotTable, $pivotForeignKey, $pivotRelatedKey] = $this->getBelongsToManyPivotConfig();
 
         if (!$pivotTable || !$pivotForeignKey || !$pivotRelatedKey) {
             // Fallback to direct query if no pivot table specified
@@ -162,6 +150,11 @@ trait HasRelations
      */
     protected function getForeignAndPrimaryKey($className, $attributeClass)
     {
+        $cacheKey = static::class . '|' . $attributeClass;
+        if (isset(self::$relationKeysCache[$cacheKey])) {
+            return self::$relationKeysCache[$cacheKey];
+        }
+
         $reflection = new \ReflectionClass($this);
         foreach ($reflection->getProperties() as $property) {
             foreach ($property->getAttributes($attributeClass) as $attr) {
@@ -174,8 +167,35 @@ trait HasRelations
                     throw new \RuntimeException("Missing primaryKey or foreignKey in attribute {$attributeClass}");
                 }
 
-                return [$primaryKey, $foreignKey];
+                self::$relationKeysCache[$cacheKey] = [$primaryKey, $foreignKey];
+                return self::$relationKeysCache[$cacheKey];
             }
         }
+    }
+
+    private function getBelongsToManyPivotConfig(): array
+    {
+        $cacheKey = static::class;
+        if (isset(self::$belongsToManyPivotCache[$cacheKey])) {
+            return self::$belongsToManyPivotCache[$cacheKey];
+        }
+
+        $reflection = new \ReflectionClass($this);
+        $pivotTable = null;
+        $pivotForeignKey = null;
+        $pivotRelatedKey = null;
+
+        foreach ($reflection->getProperties() as $property) {
+            foreach ($property->getAttributes(BelongsToMany::class) as $attr) {
+                $args = $attr->getArguments();
+                $pivotTable = $args['pivotTable'] ?? $args[3] ?? null;
+                $pivotForeignKey = $args['pivotForeignKey'] ?? $args[4] ?? null;
+                $pivotRelatedKey = $args['pivotRelatedKey'] ?? $args[5] ?? null;
+                break 2;
+            }
+        }
+
+        self::$belongsToManyPivotCache[$cacheKey] = [$pivotTable, $pivotForeignKey, $pivotRelatedKey];
+        return self::$belongsToManyPivotCache[$cacheKey];
     }
 }

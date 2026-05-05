@@ -3,6 +3,11 @@
 namespace Nraa\Pillars\Console;
 
 use Nraa\Helpers\IndexManager;
+use Nraa\Workers\Documents\JobDocument;
+use Nraa\Workers\Documents\JobExecutionDocument;
+use Nraa\Workers\Documents\JobLogDocument;
+use Nraa\Workers\Documents\RecurringJobDocument;
+use Nraa\Workers\Documents\ScheduledJobDocument;
 use Symfony\Component\Console\Attribute\AsCommand;
 use Symfony\Component\Console\Command\Command;
 use Symfony\Component\Console\Input\InputInterface;
@@ -110,7 +115,7 @@ class UpdateIndexesCommand extends Command
     private function discoverModelClasses(): array
     {
         $modelsDir = dirname(__DIR__, 3) . '/app/Models';
-        $modelClasses = [];
+        $modelClasses = $this->getAdditionalIndexModels();
         
         if (!is_dir($modelsDir)) {
             return $modelClasses;
@@ -173,8 +178,23 @@ class UpdateIndexesCommand extends Command
         }
         
         // Sort alphabetically for consistent output
+        $modelClasses = array_values(array_unique($modelClasses));
         sort($modelClasses);
-        
+
         return $modelClasses;
+    }
+
+    /**
+     * @return array<int, class-string>
+     */
+    private function getAdditionalIndexModels(): array
+    {
+        return [
+            JobDocument::class,
+            ScheduledJobDocument::class,
+            RecurringJobDocument::class,
+            JobExecutionDocument::class,
+            JobLogDocument::class,
+        ];
     }
 }

@@ -2,8 +2,11 @@
 
 namespace Nraa\Workers\Documents;
 
+use Nraa\Database\Attributes\Index;
 use Nraa\Database\Model;
 
+#[Index(keys: ['jobId' => 1, 'finishedAt' => -1], options: [])]
+#[Index(keys: ['finishedAt' => -1], options: [])]
 final class JobExecutionDocument extends Model
 {
     protected static $collection = 'job_executions';

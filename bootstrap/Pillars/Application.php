@@ -111,13 +111,15 @@ final class Application
     {
         // Load environment configuration
         $dotenv = new Dotenv();
-        $dotenv->load(path: $this->basePath . '/.env');
+        $dotenv->load(path: $this->resolveEnvironmentFilePath());
         $this->addConfigurationProvider(config: $dotenv);
         $this->debug = (bool)($_ENV['DEBUG'] ?? false);
         $this->configuration = $_ENV;
 
         // Configure logging
-        $this->logConfiguration = require $this->basePath . '/app/config/log.php';
+        $this->logConfiguration = $this->isRunningTests()
+            ? []
+            : require $this->basePath . '/app/config/log.php';
         $logging = new Logging(basePath: $this->getStoragePath(), configuration: $this->logConfiguration);
         $this->registerSingleton(singleton: $logging);
 
@@ -131,6 +133,34 @@ final class Application
         set_error_handler(callback: [\Nraa\Exceptions\ExceptionHandler::class, 'phpErrorHandler']);
 
         require_once $this->basePath . '/bootstrap/Pillars/Helpers/functions.php';
+    }
+
+    private function resolveEnvironmentFilePath(): string
+    {
+        $candidatePaths = [
+            $this->basePath . '/.env',
+            (string)($_ENV['APP_ENV_SOURCE_FILE'] ?? getenv('APP_ENV_SOURCE_FILE') ?: ''),
+            '/run/secrets/app_env',
+        ];
+
+        foreach ($candidatePaths as $candidatePath) {
+            if ($candidatePath !== '' && is_readable($candidatePath)) {
+                return $candidatePath;
+            }
+        }
+
+        return $this->basePath . '/.env';
+    }
+
+    private function isRunningTests(): bool
+    {
+        $flag = $_ENV['APP_RUNNING_TESTS'] ?? getenv('APP_RUNNING_TESTS') ?: null;
+        if (filter_var($flag, FILTER_VALIDATE_BOOLEAN) === true) {
+            return true;
+        }
+
+        $appEnv = strtolower(trim((string)($_ENV['APP_ENV'] ?? getenv('APP_ENV') ?: '')));
+        return in_array($appEnv, ['test', 'testing'], true);
     }
 
     /**
@@ -320,6 +350,19 @@ final class Application
     {
         dispatch(...$args);
         return $this;
+    }
+
+    /**
+     * Queue a pending dispatch item.
+     *
+     * Backward-compatibility shim used by helper-level dispatch().
+     *
+     * @param PendingDispatch $pending
+     * @return void
+     */
+    public function addPendingDispatch(PendingDispatch $pending): void
+    {
+        $this->_pendingDispatch->enqueue($pending);
     }
 
     /**

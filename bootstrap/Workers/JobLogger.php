@@ -16,8 +16,9 @@ use Nraa\Pillars\Log;
  */
 class JobLogger
 {
-    private static ?string $logDir = null;
     private static string $logLevel = 'INFO';
+    private static string $logTarget = 'stdout';
+    private static ?string $logDir = null;
 
     /**
      * Initialize logger configuration
@@ -27,19 +28,15 @@ class JobLogger
     private static function initialize(): void
     {
         if (self::$logDir === null) {
-            // Determine log directory
             $basePath = dirname(__DIR__, 3);
-            $logPath = $_ENV['JOB_LOG_DIR'] ?? $basePath . '/storage/logs/jobs';
-            
-            // Create directory if it doesn't exist
-            if (!is_dir($logPath)) {
-                @mkdir($logPath, 0755, true);
+            self::$logTarget = strtolower(trim((string)($_ENV['JOB_LOG_TARGET'] ?? 'stdout'))) ?: 'stdout';
+            self::$logDir = $_ENV['JOB_LOG_DIR'] ?? $basePath . '/storage/logs/jobs';
+
+            if (self::$logTarget === 'file' && !is_dir(self::$logDir)) {
+                @mkdir(self::$logDir, 0755, true);
             }
-            
-            self::$logDir = $logPath;
         }
-        
-        // Set log level from environment
+
         self::$logLevel = strtoupper($_ENV['LOG_LEVEL'] ?? 'INFO');
     }
 
@@ -97,11 +94,11 @@ class JobLogger
             $context = array_merge($context, $metadata);
         }
 
-        // Format log line for file output
+        // Format log line for structured stream/file output
         $logLine = self::formatLogLine($timestampStr, $level, $message, $context);
 
-        // Write to local file
-        self::writeToFile($logLine, $level);
+        // Write to configured local sink
+        self::writeToSink($logLine, $level);
 
         // Write to MongoDB (async - don't block on failures)
         try {
@@ -184,14 +181,20 @@ class JobLogger
     }
 
     /**
-     * Write log line to file
+     * Write log line to configured sink
      * 
      * @param string $logLine Formatted log line
      * @param string $level Log level
      * @return void
      */
-    private static function writeToFile(string $logLine, string $level): void
+    private static function writeToSink(string $logLine, string $level): void
     {
+        if (self::$logTarget !== 'file') {
+            $stream = $level === 'error' ? 'php://stderr' : 'php://stdout';
+            @file_put_contents($stream, $logLine, FILE_APPEND | LOCK_EX);
+            return;
+        }
+
         $date = date('Y-m-d');
         $logFile = self::$logDir . '/job-' . $date . '.log';
 

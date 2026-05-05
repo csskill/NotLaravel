@@ -1,0 +1,81 @@
+<?php
+
+namespace {{ namespace }};
+
+use \Nraa\Database\MongoDBObject;
+use \MongoDB\BSON\ObjectId;
+use \MongoDB\BSON\UTCDateTime;
+use \MongoDB\Collection;
+use \MongoDB\Database;
+use \MongoDB\Driver\Exception\Exception as MongoDriverException;
+
+
+final class {{ modelname }} extends MongoDBObject
+{
+
+    protected $fillable = [];
+
+    public static function getCollectionName(): string
+    {
+        return '{{ modelname }}';
+    }
+
+    public static function new(string $name, array $attributes = []): self
+    {
+        return parent::new($name, $attributes);
+    }
+
+    public static function fromDocument(array $doc = []): self
+    {
+        return parent::fromDocument($doc);
+    }
+
+    public function touch(): void
+    {
+        parent::touch();
+    }
+
+    public function validate(): void
+    {
+        parent::validate();
+    }
+
+    /**
+     * Create the indexes for the collection if they do not exist.
+     *
+     * @return void
+     */
+    public static function ensureIndexes(): void
+    {
+        parent::ensureIndexes();
+    }
+
+    public static function find(array $filter = [], array $options = []): iterable
+    {
+        return yield from parent::find($filter, $options) ?? [];
+    }
+
+    /**
+     * Bulk insert documents into the collection.
+     *
+     * @param array $data an array of associative arrays with keys matching the
+     *                    properties of the object.
+     *
+     * @return array an array of inserted ids.
+     */
+    public static function bulkInsert($data): array
+    {
+        return parent::bulkInsert($data);
+    }
+
+    public function save(): bool
+    {
+        return parent::save();
+    }
+
+    public static function hydrateMany(iterable $docs): array
+    {
+        return parent::hydrateMany($docs);
+    }
+
+}

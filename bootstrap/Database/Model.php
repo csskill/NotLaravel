@@ -16,6 +16,8 @@ use MongoDB\BSON\Persistable;
 
 class Model implements Persistable
 {
+    public const CONNECTION_PRIMARY = MongoDBDriver::CONNECTION_PRIMARY;
+    public const CONNECTION_WEB_READ = MongoDBDriver::CONNECTION_WEB_READ;
 
     use MongoDBTransactionalTrait;
 
@@ -24,6 +26,8 @@ class Model implements Persistable
     public ?\MongoDB\BSON\UTCDateTime $updatedAt = null;
     protected static $collection = '';
     protected $db;
+    protected string $connectionName = self::CONNECTION_PRIMARY;
+    protected ?string $collectionConnectionName = null;
 
     // new: hold an instance of MongoDB\Collection
     protected Collection $collectionInstance;
@@ -37,17 +41,19 @@ class Model implements Persistable
      * @see \MongoDB\Collection
      * @see \Nraa\Database\Drivers\MongoDBDriver
      */
-    function __construct()
+    function __construct(string $connectionName = self::CONNECTION_PRIMARY)
     {
-        $this->db = MongoDBDriver::getInstance();
+        $this->connectionName = MongoDBDriver::normalizeConnectionName($connectionName);
+        $this->db = MongoDBDriver::getInstance(connectionName: $this->connectionName);
 
         // create a Collection instance rather than extending it
         $this->collectionInstance = new Collection(
-            MongoDBDriver::getManager(),
-            MongoDBDriver::getInstance()->getDatabaseName(),
+            MongoDBDriver::getManager($this->connectionName),
+            MongoDBDriver::getInstance(connectionName: $this->connectionName)->getDatabaseName(),
             static::$collection,
             ['typeMap' => ['root' => static::class]]
         );
+        $this->collectionConnectionName = $this->connectionName;
     }
 
     /**
@@ -58,15 +64,21 @@ class Model implements Persistable
      */
     public function getCollection()
     {
-        if (!isset($this->collectionInstance)) {
+        if (!isset($this->collectionInstance) || $this->collectionConnectionName !== $this->connectionName) {
             $this->collectionInstance = new Collection(
-                MongoDBDriver::getManager(),
-                MongoDBDriver::getInstance()->getDatabaseName(),
+                MongoDBDriver::getManager($this->connectionName),
+                MongoDBDriver::getInstance(connectionName: $this->connectionName)->getDatabaseName(),
                 static::$collection,
                 ['typeMap' => ['root' => static::class]]
             );
+            $this->collectionConnectionName = $this->connectionName;
         }
         return $this->collectionInstance;
+    }
+
+    public static function collectionOn(string $connectionName = self::CONNECTION_PRIMARY): Collection
+    {
+        return (new static($connectionName))->getCollection();
     }
 
     /**
@@ -80,7 +92,7 @@ class Model implements Persistable
      */
     public function getDb()
     {
-        return ($this->db instanceof MongoDBDriver) ? $this->db : MongoDBDriver::getInstance();
+        return ($this->db instanceof MongoDBDriver) ? $this->db : MongoDBDriver::getInstance(connectionName: $this->connectionName);
     }
 
 

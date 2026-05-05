@@ -45,7 +45,7 @@ class MongoDbLogProvider
     function __construct(string $logLevel, string $collection)
     {
         $this->collection = $collection;
-        $this->dbInstance = new MongoDBDriver();
+        $this->dbInstance = MongoDBDriver::getInstance();
     }
 
     /**

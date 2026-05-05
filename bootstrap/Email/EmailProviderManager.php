@@ -2,6 +2,8 @@
 
 namespace Nraa\Email;
 
+use Nraa\Email\Adapters\MailerooAdapter;
+use Nraa\Email\Adapters\NullEmailAdapter;
 use Nraa\Email\Adapters\SendGridAdapter;
 
 /**
@@ -13,6 +15,7 @@ class EmailProviderManager
 {
     protected array $config;
     protected string $defaultProvider;
+    protected bool $enabled;
     public array $providers = [];
 
     /**
@@ -21,7 +24,8 @@ class EmailProviderManager
     public function __construct(array $config = [])
     {
         $this->config = $config;
-        $this->defaultProvider = $config['default'] ?? 'sendgrid';
+        $this->enabled = (bool)($config['enabled'] ?? true);
+        $this->defaultProvider = $config['default'] ?? 'maileroo';
         $this->initialize();
     }
 
@@ -32,6 +36,13 @@ class EmailProviderManager
      */
     public function initialize(): void
     {
+        if (!$this->enabled) {
+            $this->providers['null'] = new NullEmailAdapter([
+                'driver' => 'null',
+            ]);
+            return;
+        }
+
         if (!isset($this->config['providers'])) {
             return;
         }
@@ -43,21 +54,43 @@ class EmailProviderManager
                 continue;
             }
 
-            switch ($driver) {
-                case 'sendgrid':
-                    $this->providers[$key] = new SendGridAdapter($providerConfig);
-                    break;
-                // Future providers can be added here
-                // case 'mailgun':
-                //     $this->providers[$key] = new MailgunAdapter($providerConfig);
-                //     break;
-                // case 'ses':
-                //     $this->providers[$key] = new SESAdapter($providerConfig);
-                //     break;
-                default:
-                    break;
+            try {
+                switch ($driver) {
+                    case 'maileroo':
+                        $this->providers[$key] = new MailerooAdapter($providerConfig);
+                        break;
+                    case 'sendgrid':
+                        $this->providers[$key] = new SendGridAdapter($providerConfig);
+                        break;
+                    // Future providers can be added here
+                    // case 'mailgun':
+                    //     $this->providers[$key] = new MailgunAdapter($providerConfig);
+                    //     break;
+                    // case 'ses':
+                    //     $this->providers[$key] = new SESAdapter($providerConfig);
+                    //     break;
+                    default:
+                        break;
+                }
+            } catch (\Throwable $e) {
+                $this->logInitializationWarning([
+                    'provider' => $key,
+                    'driver' => $driver,
+                    'error' => $e->getMessage(),
+                ]);
             }
         }
+    }
+
+    private function logInitializationWarning(array $context): void
+    {
+        try {
+            \Nraa\Pillars\Log::warning('EmailProviderManager: Skipping misconfigured provider', $context);
+            return;
+        } catch (\Throwable) {
+        }
+
+        error_log('EmailProviderManager: Skipping misconfigured provider ' . json_encode($context));
     }
 
     /**
@@ -69,6 +102,10 @@ class EmailProviderManager
      */
     public function provider(?string $key = null): EmailProviderInterface
     {
+        if (!$this->enabled) {
+            return $this->providers['null'];
+        }
+
         $key = $key ?? $this->defaultProvider;
 
         if (!isset($this->providers[$key])) {
@@ -86,5 +123,10 @@ class EmailProviderManager
     public function getDefaultProvider(): EmailProviderInterface
     {
         return $this->provider();
+    }
+
+    public function isEnabled(): bool
+    {
+        return $this->enabled;
     }
 }

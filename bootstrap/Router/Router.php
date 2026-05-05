@@ -7,6 +7,7 @@ namespace Nraa\Router;
 use \Nraa\Pillars\Application;
 use \Nraa\DOM\TwigLoader;
 use \Nraa\Router\Route;
+use Symfony\Component\HttpFoundation\Response;
 
 enum HttpCallbackMethod: string
 {
@@ -27,14 +28,16 @@ final class RouteOptions
     public array $permissionsRequired = [];
     public array $middlewares = [];
     public string $membershipTier = ''; // 'free', 'basic', 'premium' - minimum tier required
+    public bool $allowDuringOnboarding = false;
 
-    public function __construct($authRequired = false, $rolesAllowed = [], $permissionsRequired = [], $middlewares = [], $membershipTier = '')
+    public function __construct($authRequired = false, $rolesAllowed = [], $permissionsRequired = [], $middlewares = [], $membershipTier = '', $allowDuringOnboarding = false)
     {
         $this->authRequired = $authRequired;
         $this->rolesAllowed = $rolesAllowed;
         $this->permissionsRequired = $permissionsRequired;
         $this->middlewares = $middlewares;
         $this->membershipTier = $membershipTier;
+        $this->allowDuringOnboarding = (bool)$allowDuringOnboarding;
     }
 }
 
@@ -347,11 +350,10 @@ final class Router
         if ($matchedRoute) {
             if (!empty($matchedRoute->getAction())) {
                 $matchedRoute->checkRouteOption();
-                // We got shit to do  
                 $result = $matchedRoute->performAction($variables);
-                
-                // If result is a JsonResponse, send it
-                if ($result instanceof \Symfony\Component\HttpFoundation\JsonResponse) {
+
+                // Send any Symfony response returned by the action, including redirects and streams.
+                if ($result instanceof Response) {
                     $result->send();
                     return;
                 }
@@ -371,16 +373,13 @@ final class Router
                 return;
             }
 
-            // Check the route options
-
-            // Check for any perform any given action
+            // Check for and perform any given action
             if (!empty($route->getAction())) {
                 $route->checkRouteOption();
-                // We got shit to do
                 $result = $route->performAction();
-                
-                // If result is a JsonResponse, send it
-                if ($result instanceof \Symfony\Component\HttpFoundation\JsonResponse) {
+
+                // Send any Symfony response returned by the action, including redirects and streams.
+                if ($result instanceof Response) {
                     $result->send();
                     return;
                 }
@@ -399,6 +398,10 @@ final class Router
      */
     private function getRequestMethod()
     {
+        if (($_SERVER['REQUEST_METHOD'] ?? '') === 'HEAD') {
+            return HttpCallbackMethod::GET;
+        }
+
         foreach (HttpCallbackMethod::cases() as $reqmethod) {
             if ($reqmethod->value == $_SERVER['REQUEST_METHOD']) {
                 return $reqmethod;

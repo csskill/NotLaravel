@@ -62,7 +62,7 @@ class PoolManager
      */
     private function validatePools(): void
     {
-        $requiredFields = ['name', 'description', 'workers', 'capacity', 'timeout', 'jobs'];
+        $requiredFields = ['name', 'description', 'capacity', 'timeout', 'jobs'];
 
         foreach ($this->pools as $poolName => $config) {
             foreach ($requiredFields as $field) {
@@ -73,7 +73,7 @@ class PoolManager
                 }
             }
 
-            if (!is_int($config['workers']) || $config['workers'] < 1) {
+            if (isset($config['workers']) && (!is_int($config['workers']) || $config['workers'] < 1)) {
                 throw new \RuntimeException(
                     "Pool '$poolName' must have at least 1 worker"
                 );
@@ -83,6 +83,20 @@ class PoolManager
                 throw new \RuntimeException(
                     "Pool '$poolName' must have capacity >= 1"
                 );
+            }
+
+            if (isset($config['runner_processes'])) {
+                if (!is_int($config['runner_processes']) || $config['runner_processes'] < 1) {
+                    throw new \RuntimeException(
+                        "Pool '$poolName' runner_processes must be an integer >= 1"
+                    );
+                }
+
+                if ($config['runner_processes'] > $config['capacity']) {
+                    throw new \RuntimeException(
+                        "Pool '$poolName' runner_processes cannot exceed total capacity"
+                    );
+                }
             }
 
             if (!is_int($config['timeout']) || $config['timeout'] < 1) {
@@ -261,8 +275,8 @@ class PoolManager
     public function getTotalWorkerCount(): int
     {
         $total = 0;
-        foreach ($this->pools as $config) {
-            $total += $config['workers'];
+        foreach ($this->pools as $poolName => $config) {
+            $total += $this->resolveWorkerCount($poolName, $config);
         }
         return $total;
     }
@@ -277,7 +291,7 @@ class PoolManager
     public function getWorkerCount(string $poolName): int
     {
         $config = $this->getPoolConfig($poolName);
-        return $config['workers'];
+        return $this->resolveWorkerCount($poolName, $config);
     }
 
     /**
@@ -351,16 +365,42 @@ class PoolManager
     {
         $stats = [];
         foreach ($this->pools as $poolName => $config) {
+            $workerCount = $this->resolveWorkerCount($poolName, $config);
             $stats[$poolName] = [
                 'name' => $config['name'],
-                'workers' => $config['workers'],
+                'workers' => $workerCount,
                 'capacity' => $config['capacity'],
-                'total_capacity' => $config['workers'] * $config['capacity'],
+                'runner_processes' => (int)($config['runner_processes'] ?? 1),
+                'total_capacity' => $workerCount * $config['capacity'],
                 'timeout' => $config['timeout'],
                 'job_classes' => count($config['jobs']),
                 'has_worker_config' => isset($config['worker_config_provider']) && $config['worker_config_provider'] !== null,
             ];
         }
         return $stats;
+    }
+
+    private function resolveWorkerCount(string $poolName, array $config): int
+    {
+        if (isset($config['workers']) && is_int($config['workers']) && $config['workers'] > 0) {
+            return $config['workers'];
+        }
+
+        $poolName = strtoupper(trim($poolName));
+        $envKeys = [
+            'WORKER_' . $poolName . '_REPLICAS',
+            'WORKER_' . $poolName . '_WORKERS',
+        ];
+
+        foreach ($envKeys as $envKey) {
+            $rawValue = $_ENV[$envKey] ?? getenv($envKey);
+            if ($rawValue === false || $rawValue === null || $rawValue === '') {
+                continue;
+            }
+
+            return max(1, (int)$rawValue);
+        }
+
+        return 1;
     }
 }

@@ -28,8 +28,15 @@ class Transaction extends Model
     public string $type = ''; // 'subscription_created', 'payment_succeeded', 'payment_failed', 'subscription_cancelled', etc.
     public string $status = ''; // 'pending', 'succeeded', 'failed', 'cancelled'
     public float $amount = 0.0;
+    public float $gross_amount = 0.0;
+    public float $net_amount = 0.0;
+    public float $tax_amount = 0.0;
+    public float $discount_amount = 0.0;
     public string $currency = 'usd';
+    public string $refund_status = 'none';
+    public bool $is_trial = false;
     public array $metadata = [];
+    public ?UTCDateTime $paid_at = null;
     public ?UTCDateTime $processed_at = null;
     public string $error_message = '';
 }

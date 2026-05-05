@@ -21,7 +21,7 @@ class JobRegistrar
     public function __construct(JobQueue $queue = null, ScheduledJobs $scheduled = null)
     {
         $this->queue = $queue ?? new JobQueue();
-        $this->scheduledJobs = $schedule ?? new ScheduledJobs();
+        $this->scheduledJobs = $scheduled ?? new ScheduledJobs();
     }
 
     /**
@@ -34,6 +34,9 @@ class JobRegistrar
      * @param bool $preventDuplicates If true, check for existing jobs with same signature before enqueuing
      * @param int|null $workerLimit Max number of workers that can process this job type simultaneously (deprecated, use pool config)
      * @param string|null $pool Pool name to assign job to (download, parse, calculation, general). If null, auto-detected from job class.
+     * @param int|null $maxAttempts Maximum retry attempts for this job. Defaults to 3.
+     * @param int|null $priority Queue priority. Higher numbers are assigned first.
+     * @param array<string,mixed>|null $jobOptions Optional queue metadata such as lane, fairness_key, or next_run_at.
      */
     public function registerJob(
         $callback,
@@ -42,15 +45,38 @@ class JobRegistrar
         ?string $employer = null,
         bool $preventDuplicates = true,
         ?int $workerLimit = null,
-        ?string $pool = null
-    ): JobDocument | ScheduledJobDocument {
+        ?string $pool = null,
+        ?int $maxAttempts = null,
+        ?int $priority = null,
+        ?array $jobOptions = null
+    ): JobDocument | ScheduledJobDocument | null {
         $callableData = $this->resolveCallable($callback);
         $resolvedParams = $this->resolveParams($params);
+        $effectiveMaxAttempts = $maxAttempts ?? 3;
+        $poolManager = new PoolManager();
+
+        if (
+            isset($callableData['class'])
+            && (new JobTypeControlService())->isJobTypeDisabled((string)$callableData['class'])
+        ) {
+            return null;
+        }
 
         // Auto-detect pool from job class if not specified
         if ($pool === null && isset($callableData['class'])) {
-            $poolManager = new PoolManager();
             $pool = $poolManager->getPoolForJobClass($callableData['class']);
+        }
+
+        $pool = $this->normalizePoolName($pool, $poolManager);
+
+        $effectivePriority = $priority !== null ? max(1, (int)$priority) : 1;
+        if ($priority === null) {
+            try {
+                $poolConfig = $poolManager->getPoolConfig($pool);
+                $effectivePriority = max(1, (int)($poolConfig['priority'] ?? 1));
+            } catch (\Throwable) {
+                $effectivePriority = 1;
+            }
         }
 
         // When creating/enqueuing jobs via JobQueue or JobRegistrar, include:
@@ -58,16 +84,15 @@ class JobRegistrar
             'task' => $callableData,
             'instructions' => $resolvedParams,
             'employer' => $employer ?? 'System',
-            'priority' => 1,
+            'priority' => $effectivePriority,
             'status' => 'pending',
             'attempts' => 0,
-            'maxAttempts' => 3,
+            'maxAttempts' => max(1, $effectiveMaxAttempts),
         ];
 
         // Add pool assignment
-        if ($pool !== null) {
-            $jobData['pool'] = $pool;
-        }
+        $jobData['pool'] = $pool;
+        $this->applyJobOptions($jobData, $jobOptions);
 
         // Keep workerLimit for backward compatibility (deprecated - prefer pool config)
         if ($workerLimit !== null) {
@@ -145,5 +170,58 @@ class JobRegistrar
             $sanitizedParams[] = $param;
         }
         return $sanitizedParams;
+    }
+
+    private function normalizePoolName(?string $pool, PoolManager $poolManager): string
+    {
+        $normalized = strtolower(trim((string)$pool));
+        if ($normalized === '') {
+            return 'general';
+        }
+
+        if ($poolManager->poolExists($normalized)) {
+            return $normalized;
+        }
+
+        return 'general';
+    }
+
+    /**
+     * @param array<string,mixed> $jobData
+     * @param array<string,mixed>|null $jobOptions
+     */
+    private function applyJobOptions(array &$jobData, ?array $jobOptions): void
+    {
+        if (!is_array($jobOptions) || $jobOptions === []) {
+            return;
+        }
+
+        $lane = strtolower(trim((string)($jobOptions['lane'] ?? '')));
+        if (in_array($lane, ['realtime', 'backfill'], true)) {
+            $jobData['lane'] = $lane;
+        }
+
+        $fairnessKey = trim((string)($jobOptions['fairness_key'] ?? ''));
+        if ($fairnessKey !== '') {
+            $jobData['fairness_key'] = $fairnessKey;
+        }
+
+        $nextRunAt = $this->normalizeNextRunAt($jobOptions['next_run_at'] ?? null);
+        if ($nextRunAt instanceof \MongoDB\BSON\UTCDateTime) {
+            $jobData['nextRunAt'] = $nextRunAt;
+        }
+    }
+
+    private function normalizeNextRunAt(mixed $value): ?\MongoDB\BSON\UTCDateTime
+    {
+        if ($value instanceof \MongoDB\BSON\UTCDateTime) {
+            return $value;
+        }
+
+        if ($value instanceof \DateTimeInterface) {
+            return new \MongoDB\BSON\UTCDateTime($value);
+        }
+
+        return null;
     }
 }
